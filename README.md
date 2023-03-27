@@ -1,1 +1,1 @@
-# go-playground
+# playground-golang
