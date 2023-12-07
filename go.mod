@@ -1,6 +1,5 @@
 module github.com/otakakot/playground-golang
 
-<<<<<<< HEAD
 go 1.26.4
 
 require (
@@ -19,6 +18,3 @@ require (
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1 // indirect
 )
-=======
-go 1.21.5
->>>>>>> 2fda21a (Update dependency go to v1.21.5)
