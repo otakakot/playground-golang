@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <title>Home</title>
+</head>
+
+<body>
+    <h1>Home</h1>
+    <button onclick="post()">click</button>
+    <script src="https://rawgithub.com/kawanet/msgpack-lite/master/dist/msgpack.min.js"></script>
+    <script>
+        async function post() {
+            const response = await fetch("http://localhost:8080/message", {
+                method: "POST",
+                body: JSON.stringify(),
+            });
+
+            const buf = await response.arrayBuffer();
+
+            console.info(buf);
+
+            const dec = msgpack.decode(new Uint8Array(buf.slice()));
+
+            console.info(dec);
+        }
+    </script>
+</body>
+
+</html>
