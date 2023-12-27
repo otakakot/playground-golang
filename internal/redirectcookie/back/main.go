@@ -10,13 +10,21 @@ import (
 	"github.com/google/uuid"
 )
 
+const name = "session"
+
+var mem = make(map[string]string)
+
 func main() {
 	http.HandleFunc("/begin", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info(r.URL.String())
 
+		session := uuid.NewString()
+
+		mem[session] = uuid.NewString()
+
 		cookie := http.Cookie{
-			Name:     "session",
-			Value:    uuid.NewString(),
+			Name:     name,
+			Value:    session,
 			Expires:  time.Now().Add(time.Hour),
 			Secure:   true,
 			HttpOnly: true,
@@ -43,7 +51,7 @@ func main() {
 	http.HandleFunc("/end", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info(r.URL.String())
 
-		cookie, err := r.Cookie("session")
+		cookie, err := r.Cookie(name)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 
@@ -52,7 +60,11 @@ func main() {
 
 		slog.Info(fmt.Sprintf("cookie: %s", cookie.Value))
 
-		w.Write([]byte(cookie.Value))
+		val := mem[cookie.Value]
+
+		delete(mem, cookie.Value)
+
+		w.Write([]byte(val))
 	})
 
 	slog.Info("Listening on :8080")
