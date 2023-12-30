@@ -6,7 +6,7 @@ require (
 	github.com/google/uuid v1.5.0
 	github.com/lib/pq v1.10.9
 	github.com/spf13/cobra v1.8.0
-	github.com/urfave/cli/v2 v2.26.0
+	github.com/urfave/cli/v2 v2.27.1
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 )
 
