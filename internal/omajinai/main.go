@@ -2,15 +2,15 @@ package main
 
 import "context"
 
-type Interface interface {
-	Do(ctx context.Context) error
+type Interface[T any] interface {
+	Do(ctx context.Context) (*T, error)
 }
 
-var _ Interface = (*Struct)(nil)
+var _ Interface[any] = (*Struct[any])(nil)
 
-type Struct struct{}
+type Struct[T any] struct{}
 
 // Do implements Interface.
-func (str *Struct) Do(ctx context.Context) error {
+func (s *Struct[T]) Do(ctx context.Context) (*T, error) {
 	panic("unimplemented")
 }
