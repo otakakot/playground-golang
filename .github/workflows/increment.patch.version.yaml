@@ -9,7 +9,7 @@ defaults:
     shell: bash
 jobs:
   increment-patch-version:
-    if: github.event.pull_request.merged == true
+    if: github.event.pull_request.merged == true && contains(github.event.pull_request.labels.*.name, 'renovate')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -26,7 +26,6 @@ jobs:
           token: ${{ steps.generate-token.outputs.token }}
       - name: Increment patch version
         id: increment-patch-version
-        if: contains(github.event.pull_request.labels.*.name, 'renovate')
         env:
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
         run: |
@@ -39,7 +38,6 @@ jobs:
           new_version="v${major}.${minor}.${patch}"
           echo "new_version=${new_version}" >> $GITHUB_OUTPUT
       - name: Push tag
-        if: contains(github.event.pull_request.labels.*.name, 'renovate')
         env:
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
         run: |
