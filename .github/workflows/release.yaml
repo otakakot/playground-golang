@@ -1,11 +1,16 @@
 name: release
+run-name: ${{ github.ref_name }} by @${{ github.actor }} at ${{ github.workflow }}
 on:
   push:
     tags:
       - "v*"
+defaults:
+  run:
+    shell: bash
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: write
     steps:
