@@ -1,7 +1,7 @@
 services:
   postgres:
     container_name: playground-postgres
-    image: postgres:17.2-alpine
+    image: postgres:17-alpine
     ports:
       - ${POSTGRES_PORT}:5432
     environment:
@@ -15,7 +15,7 @@ services:
     restart: always
   redis:
     container_name: playground-redis
-    image: redis:7.2.4-alpine
+    image: redis:7-alpine
     ports:
       - ${REDIS_PORT}:6379
     restart: always
