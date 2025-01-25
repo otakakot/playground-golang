@@ -1,4 +1,4 @@
-name: add renovate label
+name: auto approve
 run-name: ${{ github.ref_name }} by @${{ github.actor }} ${{ github.workflow }}
 on:
   pull_request:
@@ -8,10 +8,10 @@ defaults:
   run:
     shell: bash
 jobs:
-  add-renovate-label:
+  auto-approve:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: ${{ startsWith( github.head_ref , 'renovate') }}
+    if: ${{ github.actor }} == '@otakakot'
     steps:
       - name: Check branch
         run: echo "${{ github.head_ref }}"
@@ -21,11 +21,10 @@ jobs:
         with:
           app-id: ${{ secrets.BOT_GITHUB_APP_ID }}
           private-key: ${{ secrets.BOT_GITHUB_APP_PRIVATE_KEY }}
-      - name: Add renovate label
+      - name: Approve
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
         run: |
-          gh pr edit "${PR_URL}" --add-label "renovate"
           gh pr review --approve "${PR_URL}"
