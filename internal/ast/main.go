@@ -21,7 +21,7 @@ func main() {
 
 	paths := []string{}
 
-	err := filepath.Walk(dirname, func(path string, info os.FileInfo, err error) error {
+	if ferr := filepath.Walk(dirname, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			fmt.Printf("prevent panic by handling failure accessing a path %q: %v\n", path, err)
 			return err
@@ -31,9 +31,8 @@ func main() {
 			paths = append(paths, path)
 		}
 		return nil
-	})
-	if err != nil {
-		fmt.Printf("error walking the path %v: %v\n", dirname, err)
+	}); ferr != nil {
+		fmt.Printf("error walking the path %v: %v\n", dirname, ferr)
 		return
 	}
 
