@@ -31,7 +31,6 @@ func main() {
 			paths = append(paths, path)
 		}
 		return nil
-<<<<<<< HEAD
 	}); ferr != nil {
 		fmt.Printf("error walking the path %v: %v\n", dirname, ferr)
 		return
