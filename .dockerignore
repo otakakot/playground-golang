@@ -1,0 +1,7 @@
+# Ignore everything by default
+*
+
+# Allow only the files required for the build
+!main.go
+!go.mod
+!go.sum
