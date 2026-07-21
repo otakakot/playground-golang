@@ -1,6 +1,6 @@
 module github.com/otakakot/playground-golang
 
-go 1.26
+go 1.26.5
 
 require (
 	github.com/gin-gonic/gin v1.12.0
