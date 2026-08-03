@@ -692,7 +692,54 @@ func (e *articleNotFoundError) NotFound() bool { return true }</code></pre>
     </ul>
   </div>
 
-  <h2>6. まとめ</h2>
+  <h2>6. デファクト・スタンダードな選択</h2>
+  <div class="card">
+    <p>
+      Go における「見つからなかった」のデファクト・スタンダードは、<strong>センチネルエラー</strong>です。
+      <code>var ErrNotFound = errors.New("not found")</code> のように、パッケージレベルで定義された値を <code>errors.Is</code> で判定するのが最も一般的です。
+    </p>
+    <pre><code>var ErrNotFound = errors.New("not found")
+
+if errors.Is(err, ErrNotFound) {
+    http.Error(w, "not found", http.StatusNotFound)
+}</code></pre>
+    <p>
+      これは標準ライブラリでも同じ形です。<code>database/sql.ErrNoRows</code>、<code>os.ErrNotExist</code>、<code>io.EOF</code> など、すべてセンチネルエラーです。
+      また、<code>gorm</code> の <code>ErrRecordNotFound</code>、<code>mongo-go-driver</code> の <code>ErrNoDocuments</code>、<code>go-redis</code> の <code>Nil</code> も同じくセンチネルです。
+    </p>
+    <p class="ref">
+      参照: <a href="https://github.com/golang/go/blob/master/src/database/sql/sql.go"><code>database/sql.ErrNoRows</code></a>,
+      <a href="https://github.com/golang/go/blob/master/src/os/error.go"><code>os.ErrNotExist</code></a>,
+      <a href="https://github.com/golang/go/blob/master/src/io/io.go"><code>io.EOF</code></a>,
+      <a href="https://github.com/go-gorm/gorm/blob/master/errors.go"><code>gorm.ErrRecordNotFound</code></a>,
+      <a href="https://github.com/mongodb/mongo-go-driver/blob/master/mongo/errors.go"><code>mongo.ErrNoDocuments</code></a>,
+      <a href="https://github.com/redis/go-redis/blob/master/error.go"><code>redis.Nil</code></a>
+    </p>
+    <p>
+      ただし、詳細なコンテキスト（リソース名や ID、HTTP ステータス）を含めたい場合は、<code>ent</code> や <code>k8s/apimachinery</code> のように <strong>型付きエラー</strong>を使い、<code>errors.As</code> や <code>errors.Is</code> と連携させるのが標準です。
+    </p>
+    <pre><code>type NotFoundError struct {
+    Resource string
+    ID       string
+}
+
+func (e *NotFoundError) Error() string {
+    return fmt.Sprintf("%s %s not found", e.Resource, e.ID)
+}
+
+func (e *NotFoundError) Is(target error) bool {
+    _, ok := target.(*NotFoundError)
+    return ok
+}</code></pre>
+    <p><strong>推奨:</strong></p>
+    <ul>
+      <li>小規模〜中規模のパッケージ、ライブラリ → <code>var ErrNotFound = errors.New("not found")</code></li>
+      <li>大規模アプリ、リソース名や ID を含めたい → <code>NotFoundError</code> 型 + <code>errors.Is</code>/<code>errors.As</code> 対応</li>
+      <li>呼び出し側を統一したい → <code>IsNotFound(error) bool</code> のような横断判定関数を提供する</li>
+    </ul>
+  </div>
+
+  <h2>7. まとめ</h2>
   <div class="card">
     <p>
       NotFound は「エラー」として扱うか、「値の不在」として扱うかで実装が大きく変わる。
