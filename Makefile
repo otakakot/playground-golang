@@ -9,27 +9,3 @@ help: ## display this help screen
 mod: ## go modules update & go mod tidy
 	@go get -u -t ./...
 	@go mod tidy
-
-.PHONY: up
-up: ## docker compose up
-	@docker compose --project-name playground --file ./.docker/compose.yaml up -d
-
-.PHONY: down
-down: ## docker compose down
-	@docker compose --project-name playground down --volumes
-
-.PHONY: dev
-dev: ## docker compose up with hot reload
-	@docker compose --project-name playground --file ./compose.yaml up --build --watch
-
-.PHONY: dev-down
-dev-down: ## docker compose down for hot reload
-	@docker compose --project-name playground down --volumes
-
-.PHONY: balus
-balus: ## destroy everything about docker. (containers, images, volumes, networks.)
-	@docker compose --project-name playground down --rmi all --volumes
-
-.PHONY: goedit
-goedit:
-	@./script/goedit.sh
