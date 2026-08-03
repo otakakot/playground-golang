@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Go の NotFound 実装パターン解説</title>
+<style>
+  :root {
+    --bg: #f8f9fa;
+    --panel: #ffffff;
+    --text: #212529;
+    --muted: #6c757d;
+    --accent: #0d6efd;
+    --accent-light: #e7f1ff;
+    --border: #dee2e6;
+    --code-bg: #f5f5f5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2rem 1rem;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    line-height: 1.7;
+  }
+  .container {
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 1.8rem; margin-bottom: 0.5rem; }
+  .subtitle { color: var(--muted); margin-bottom: 2rem; }
+  h2 {
+    margin-top: 2.5rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 2px solid var(--border);
+    font-size: 1.4rem;
+  }
+  h3 {
+    margin-top: 1.8rem;
+    font-size: 1.15rem;
+    color: var(--accent);
+  }
+  .card {
+    background: var(--panel);
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+  }
+  .badge {
+    display: inline-block;
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    margin-right: 0.4rem;
+  }
+  .badge-error { background: var(--accent-light); color: var(--accent); }
+  .badge-noerror { background: #e6f4ea; color: #137333; }
+  .badge-oss { background: #fff3cd; color: #856404; }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem;
+    overflow-x: auto;
+    font-size: 0.9rem;
+    line-height: 1.5;
+  }
+  code {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    background: var(--code-bg);
+    padding: 0.15rem 0.35rem;
+    border-radius: 4px;
+    font-size: 0.9em;
+  }
+  pre code { background: transparent; padding: 0; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 1rem;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 0.75rem;
+    text-align: left;
+  }
+  th { background: var(--bg); }
+  tr:nth-child(even) { background: #fafafa; }
+  .note {
+    border-left: 4px solid var(--accent);
+    background: var(--accent-light);
+    padding: 1rem;
+    border-radius: 0 6px 6px 0;
+    margin: 1rem 0;
+  }
+  .note strong { display: block; margin-bottom: 0.3rem; }
+  .ref {
+    margin-top: 1rem;
+    padding-top: 0.75rem;
+    border-top: 1px dashed var(--border);
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  .ref code { background: transparent; padding: 0; }
+  .ref a { color: var(--accent); text-decoration: none; }
+  .ref a:hover { text-decoration: underline; }
+  .ref a code { color: var(--accent); }
+  .footer {
+    margin-top: 3rem;
+    color: var(--muted);
+    font-size: 0.9rem;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Go の NotFound（対象が見つからなかった）実装パターン</h1>
+  <p class="subtitle">
+    PostgreSQL / Redis に実際に接続してエラーを発生させ、OSS / ライブラリの実装パターンを比較する。
+  </p>
+
+  <div class="card">
+    <h2>はじめに</h2>
+    <p>
+      「対象が見つからなかった」という状況をコードで表現する方法は、Go でも一つではない。
+      本レポートは <code>internal/handle-not-found/main.go</code> で実際に動作させたパターンを、
+      <strong>エラー型を使う表現</strong>、<strong>エラー型を使わない表現</strong>、
+      <strong>インターフェース層で実装側に押し付ける表現</strong> に分けて解説する。
+    </p>
+  </div>
+
+  <h2>1. エラー型を使う表現</h2>
+  <p>
+    取得処理が失敗する可能性を表現したい場合、最も一般的な方法。
+    <code>errors.Is</code> / <code>errors.As</code> と組み合わせて使う。
+  </p>
+
+  <h3>1.1 センチネルエラー <span class="badge badge-error">errors.Is</span></h3>
+  <div class="card">
+    <p>
+      パッケージレベルの変数として「見つからなかった」ことを表す定数を定義し、
+      <code>errors.Is(err, ErrNotFound)</code> で判定する。
+      <span class="badge badge-oss">database/sql</span>
+      <span class="badge badge-oss">gorm</span>
+      <span class="badge badge-oss">mongo-driver</span>
+      <span class="badge badge-oss">go-redis</span>
+    </p>
+<pre><code>var ErrNotFound = errors.New("not found")
+
+// database/sql.ErrNoRows = errors.New("sql: no rows in result set")
+// gorm.ErrRecordNotFound = errors.New("record not found")
+// mongo.ErrNoDocuments   = errors.New("mongo: no documents in result")
+// redis.Nil              = errors.New("redis: nil")
+</code></pre>
+    <p>
+      <code>main.go</code> では PostgreSQL から存在しない ID を取得した際に内部で発生する
+      <code>sql.ErrNoRows</code> を、自前の <code>ErrNotFound</code> 系に変換してハンドリングしている。
+    </p>
+    <p class="ref">参照: <a href="https://github.com/golang/go/blob/master/src/database/sql/sql.go"><code>go/src/database/sql/sql.go</code></a> (ErrNoRows), <a href="https://github.com/go-gorm/gorm/blob/master/logger/logger.go"><code>gorm.io/gorm/logger/logger.go</code></a> (ErrRecordNotFound), <a href="https://github.com/mongodb/mongo-go-driver/blob/master/mongo/single_result.go"><code>go.mongodb.org/mongo-driver/mongo/single_result.go</code></a> (ErrNoDocuments), <a href="https://github.com/redis/go-redis"><code>github.com/redis/go-redis</code></a> (Nil)</p>
+  </div>
+
+  <h3>1.2 型付きエラー <span class="badge badge-error">errors.As</span></h3>
+  <div class="card">
+    <p>
+      エラーにリソース種別や ID などのメタデータを持たせる。
+      <span class="badge badge-oss">k8s.io/apimachinery</span>
+      <span class="badge badge-oss">ent</span>
+    </p>
+<pre><code>type NotFoundError struct {
+    Resource string
+    Name     string
+}
+
+func NewNotFoundError(resource, name string) *NotFoundError {
+    return &NotFoundError{Resource: resource, Name: name}
+}
+
+func (err *NotFoundError) Error() string {
+    return fmt.Sprintf("%s %q not found", err.Resource, err.Name)
+}
+
+func IsNotFound(err error) bool {
+    var target *NotFoundError
+    return errors.As(err, &target)
+}
+</code></pre>
+    <p>
+      <code>errors.As</code> を使うため、<code>fmt.Errorf("...: %w", err)</code> でラップされていても判定できる。
+    </p>
+    <p class="ref">参照: <a href="https://github.com/kubernetes/apimachinery/blob/master/pkg/api/errors/errors.go"><code>k8s.io/apimachinery/pkg/api/errors/errors.go</code></a> (NewNotFound, IsNotFound), <a href="https://github.com/ent/ent/blob/master/entc/gen/template/base.tmpl"><code>ent/entc/gen/template/base.tmpl</code></a> (NotFoundError)</p>
+  </div>
+
+  <h3>1.3 ErrorCode / ErrorFault 付きの型付きエラー</h3>
+  <div class="card">
+    <p>
+      AWS SDK v2 (smithy) のエラー型と同じ API を持たせる。
+      <code>ErrorCode()</code> でエラーコード文字列、<code>ErrorFault()</code> でクライアント/サーバー起因を返す。
+      <span class="badge badge-oss">aws-sdk-go-v2</span>
+    </p>
+<pre><code>func (err *NotFoundError) ErrorCode() string {
+    return "NotFoundError"
+}
+
+func (err *NotFoundError) ErrorFault() ErrorFault {
+    return FaultClient
+}
+</code></pre>
+    <p class="ref">参照: <a href="https://github.com/aws/aws-sdk-go-v2/blob/main/service/dynamodb/types/errors.go"><code>github.com/aws/aws-sdk-go-v2/service/dynamodb/types/errors.go</code></a> (ResourceNotFoundException 等), <a href="https://github.com/awslabs/smithy-go"><code>smithy-go</code></a></p>
+  </div>
+
+  <h3>1.4 <code>Is</code> メソッドでのエラーコード → ドメイン概念のマッピング</h3>
+  <div class="card">
+    <p>
+      標準ライブラリの <code>syscall.Errno.Is</code> と同じ思想。
+      低レイヤーのエラーコードを高レイヤーのドメイン概念にマッピングする。
+      <span class="badge badge-oss">syscall.Errno</span>
+    </p>
+    <p>
+      例: <code>ENOENT</code> は <code>fs.ErrNotExist</code> と等価、<code>EACCES</code>/<code>EPERM</code> は <code>fs.ErrPermission</code> と等価。
+    </p>
+<pre><code>func (err *NotFoundError) Is(target error) bool {
+    if target == ErrNotFound {
+        return true
+    }
+    t, ok := target.(*NotFoundError)
+    if !ok {
+        return false
+    }
+    return err.Resource == t.Resource
+}
+</code></pre>
+    <p>
+      <code>main.go</code> では PostgreSQL の <code>SQLSTATE 42P01</code>（undefined_table）を
+      <code>MapPQError</code> で <code>NotFoundError</code> に変換している。
+    </p>
+    <p class="ref">参照: <a href="https://github.com/golang/go/blob/master/src/syscall/syscall_unix.go"><code>go/src/syscall/syscall_unix.go</code></a> (Errno.Is), <a href="https://github.com/lib/pq/blob/master/error.go"><code>github.com/lib/pq/error.go</code></a> (*Error.SQLState)</p>
+  </div>
+
+  <h3>1.5 MaskNotFound によるマスク</h3>
+  <div class="card">
+    <p>
+      ent の <code>MaskNotFound</code> と同じ。NotFound エラーをあえて <code>nil</code> に変換する。
+      <span class="badge badge-oss">ent</span>
+    </p>
+<pre><code>func MaskNotFound(err error) error {
+    if IsNotFound(err) {
+        return nil
+    }
+    return err
+}
+</code></pre>
+    <div class="note">
+      <strong>使いどころ</strong>
+      存在確認が目的で、呼び出し側が「無かった」ことを通常の成功と同等に扱いたい場合。
+    </div>
+    <p class="ref">参照: <a href="https://github.com/ent/ent/blob/master/entc/gen/template/base.tmpl"><code>ent/entc/gen/template/base.tmpl</code></a> (MaskNotFound)</p>
+  </div>
+
+  <h3>1.6 HTTP ステータスへの変換</h3>
+  <div class="card">
+    <p>
+      ドメイン層のエラー表現を、HTTP レイヤーで 404 に変換する。
+    </p>
+<pre><code>func ToHTTPStatus(err error) int {
+    switch {
+    case errors.Is(err, ErrNotFound),
+        errors.Is(err, sql.ErrNoRows),
+        errors.Is(err, redis.Nil),
+        errors.Is(err, fs.ErrNotExist):
+        return http.StatusNotFound
+    default:
+        return http.StatusInternalServerError
+    }
+}
+</code></pre>
+    <p class="ref">参照: <a href="https://github.com/kubernetes/apimachinery/blob/master/pkg/api/errors/errors.go"><code>k8s.io/apimachinery/pkg/api/errors/errors.go</code></a> (NewNotFound は http.StatusNotFound を含む), <a href="https://github.com/golang/go/blob/master/src/net/http/server.go"><code>go/src/net/http/server.go</code></a> (http.NotFound)</p>
+  </div>
+
+  <h2>2. エラー型を使わない表現</h2>
+  <p>
+    NotFound は必ずしも「エラー」として扱う必要はない。
+    Go では zero value / comma ok / 空コレクション / Null 型などで表現できる。
+  </p>
+
+  <h3>2.1 comma ok: <code>(T, bool)</code></h3>
+  <div class="card">
+    <p>
+      値と存在有無を同時に返す。Go の map アクセスや <code>os.LookupEnv</code>、<code>sync.Map.Load</code> と同じ。
+      <span class="badge badge-oss">os.LookupEnv</span>
+      <span class="badge badge-oss">sync.Map</span>
+      <span class="badge badge-oss">samber/lo</span>
+    </p>
+<pre><code>func (r *UserRepo) LookupByID(ctx context.Context, id string) (*User, bool) {
+    u, err := r.queryUser(ctx, id)
+    if err != nil {
+        return nil, false
+    }
+    return &u, true
+}
+
+user, ok := repo.LookupByID(ctx, id)
+if !ok {
+    // 見つからなかった
+}
+</code></pre>
+    <p class="ref">参照: <a href="https://github.com/golang/go/blob/master/src/os/env.go"><code>go/src/os/env.go</code></a> (LookupEnv), <a href="https://github.com/golang/go/blob/master/src/sync/map.go"><code>go/src/sync/map.go</code></a> (Map.Load), <a href="https://github.com/samber/lo/blob/master/find.go"><code>github.com/samber/lo/find.go</code></a> (Find)</p>
+  </div>
+
+  <h3>2.2 Option 型</h3>
+  <div class="card">
+    <p>
+      <code>samber/mo</code> の <code>Option[T]</code> と同じ API。
+      Some/None で存在を型として表現する。
+      <span class="badge badge-oss">samber/mo</span>
+    </p>
+<pre><code>type Option[T any] struct {
+    isPresent bool
+    value     T
+}
+
+func Some[T any](value T) Option[T]
+func None[T any]() Option[T]
+func (o Option[T]) IsSome() bool
+func (o Option[T]) IsNone() bool
+func (o Option[T]) Get() (T, bool)
+</code></pre>
+    <p>
+      <code>FindByID</code> は見つからない場合に <code>None[User]()</code> を返す。
+      エラー型を使わないので、エラー処理が不要なパスで有効。
+    </p>
+    <p class="ref">参照: <a href="https://github.com/samber/mo/blob/master/option.go"><code>github.com/samber/mo/option.go</code></a> (Option[T]); 源流として Rust <a href="https://doc.rust-lang.org/std/option/"><code>std::option::Option</code></a>, Java <a href="https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/util/Optional.html"><code>java.util.Optional</code></a></p>
+  </div>
+
+  <h3>2.3 存在確認 API の分離</h3>
+  <div class="card">
+    <p>
+      「取得する」と「存在するかどうか」を別 API にする。
+      <code>viper.IsSet</code> などの流儀。
+      <span class="badge badge-oss">spf13/viper</span>
+    </p>
+<pre><code>func (r *UserRepo) Exists(ctx context.Context, id string) (bool, error) {
+    var exists bool
+    err := r.db.QueryRowContext(ctx,
+        "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)", id).Scan(&exists)
+    return exists, err
+}
+</code></pre>
+    <p class="ref">参照: <a href="https://github.com/spf13/viper/blob/master/viper.go"><code>github.com/spf13/viper/viper.go</code></a> (IsSet), <a href="https://github.com/redis/go-redis/blob/master/commands.go"><code>github.com/redis/go-redis/v9/commands.go</code></a> (Exists)</p>
+  </div>
+
+  <h3>2.4 空コレクションを返す</h3>
+  <div class="card">
+    <p>
+      一覧取得系では 0 件も正常な結果として空のスライスを返す。
+      <code>mongo.Find</code>、<code>database/sql</code> の <code>Rows</code> ループと同じ。
+      <span class="badge badge-oss">mongo-driver</span>
+    </p>
+<pre><code>func (r *UserRepo) List(ctx context.Context) ([]User, error) {
+    // ...
+    users := make([]User, 0)
+    for rows.Next() {
+        // ...
+        users = append(users, u)
+    }
+    return users, rows.Err()
+}
+</code></pre>
+    <div class="note">
+      <strong>ポイント</strong>
+      0 件は「NotFound」ではなく「結果が空」という解釈にする。呼び出し側は <code>len(users) == 0</code> で判定する。
+    </div>
+    <p class="ref">参照: <a href="https://github.com/mongodb/mongo-go-driver/blob/master/mongo/collection.go"><code>go.mongodb.org/mongo-driver/mongo/collection.go</code></a> (Find), <a href="https://github.com/golang/go/blob/master/src/database/sql/sql.go"><code>go/src/database/sql/sql.go</code></a> (Rows)</p>
+  </div>
+
+  <h3>2.5 番兵値</h3>
+  <div class="card">
+    <p>
+      値がないことを特殊な値で表す。
+      <code>strings.Index</code> は見つからない場合に <code>-1</code> を返す。
+      Redis の <code>EXISTS</code> は存在数を <code>0</code> で返す。
+      <span class="badge badge-oss">strings</span>
+      <span class="badge badge-oss">redis</span>
+    </p>
+<pre><code>if strings.Index("a,b,c", "z") == -1 {
+    // 見つからなかった
+}
+
+if n, _ := rdb.Exists(ctx, key).Result(); n == 0 {
+    // キーが存在しない
+}
+</code></pre>
+    <p class="ref">参照: <a href="https://github.com/golang/go/blob/master/src/strings/strings.go"><code>go/src/strings/strings.go</code></a> (Index), <a href="https://github.com/redis/go-redis/blob/master/commands.go"><code>github.com/redis/go-redis/v9/commands.go</code></a> (Exists)</p>
+  </div>
+
+  <h3>2.6 Null 型</h3>
+  <div class="card">
+    <p>
+      <code>sql.NullString</code> などで「値が設定されていない」を表現する。
+      JSON の <code>null</code> と同じ意味論。
+      <span class="badge badge-oss">database/sql</span>
+    </p>
+<pre><code>var nickname sql.NullString
+rows.Scan(&nickname)
+
+if !nickname.Valid {
+    // 値が NULL → 未設定
+}
+</code></pre>
+    <p class="ref">参照: <a href="https://github.com/golang/go/blob/master/src/database/sql/sql.go"><code>go/src/database/sql/sql.go</code></a> (NullString, NullInt64 等)</p>
+  </div>
+
+  <h3>2.7 <code>http.NotFound</code> helper</h3>
+  <div class="card">
+    <p>
+      HTTP 層ではエラー型を経由せず、直接レスポンスに 404 を書く。
+      <span class="badge badge-oss">net/http</span>
+    </p>
+<pre><code>rec := httptest.NewRecorder()
+http.NotFound(rec, r)
+// rec.Code == 404
+</code></pre>
+    <p class="ref">参照: <a href="https://github.com/golang/go/blob/master/src/net/http/server.go"><code>go/src/net/http/server.go</code></a> (NotFound, NotFoundHandler)</p>
+  </div>
+
+  <h2>3. インターフェース層で NotFound を実装側に押し付ける</h2>
+  <p>
+    インターフェースを挟むと、「NotFound をどう表現するか」を実装側に委ねられる。
+    呼び出し側は <code>IsNotFound(err)</code> などの統一判定だけを使い、実装の詳細を知らなくて済む。
+  </p>
+
+  <h3>3.1 インターフェース契約</h3>
+  <div class="card">
+    <p>
+      <code>UserStore</code> インターフェースは「見つからない場合は NotFound 系エラーを返す」ことを約束する。
+      実装側がセンチネルでも型付きでも自前の型でもよい。
+    </p>
+<pre><code>type UserStore interface {
+    Get(ctx context.Context, id string) (*User, error)
+    Exists(ctx context.Context, id string) (bool, error)
+    Lookup(ctx context.Context, id string) (*User, bool, error)
+}</code></pre>
+    <p class="ref">参考: <a href="https://github.com/ent/ent/blob/master/entc/integration/ent/client.go"><code>ent/entc/integration/ent/client.go</code></a> (UserClient.Get は *NotFoundError を返す契約), <a href="https://github.com/go-gorm/gorm/blob/master/finisher_api.go"><code>gorm.io/gorm/finisher_api.go</code></a> (*DB.First/Last/Take は ErrRecordNotFound を返す契約)</p>
+  </div>
+
+  <h3>3.2 センチネル契約（方法1）</h3>
+  <div class="card">
+    <p>
+      パッケージが <code>ErrNotFound</code> を公開し、実装側は <code>%w</code> でラップして返す。
+      文脈付与は実装側の裁量。
+    </p>
+<pre><code>func (s *RedisUserStore) Get(ctx, id) (*User, error) {
+    if errors.Is(err, redis.Nil) {
+        return nil, fmt.Errorf("redis store: %w", ErrNotFound)
+    }
+    // ...
+}</code></pre>
+    <p class="ref">参照: <a href="https://github.com/go-gorm/gorm/blob/master/finisher_api.go"><code>gorm.io/gorm/finisher_api.go</code></a> (*DB.First/Last/Take が ErrRecordNotFound を返す)</p>
+  </div>
+
+  <h3>3.3 型付きエラー契約（方法2）</h3>
+  <div class="card">
+    <p>
+      実装側は <code>NotFoundError</code> を使って「どのリソースが無いか」を返す。
+      呼び出し側は <code>errors.As</code> でメタデータを取り出せる。
+    </p>
+<pre><code>func (s *PostgresUserStore) Get(ctx, id) (*User, error) {
+    return s.repo.GetByID(ctx, id)  // NotFoundError をそのまま伝搬
+}</code></pre>
+    <p class="ref">参照: <a href="https://github.com/ent/ent/blob/master/entc/integration/ent/client.go"><code>ent/entc/integration/ent/client.go</code></a> (UserClient.Get), <a href="https://github.com/ent/ent/blob/master/entc/gen/template/base.tmpl"><code>ent/entc/gen/template/base.tmpl</code></a> (NotFoundError)</p>
+  </div>
+
+  <h3>3.4 自己申告契約（方法3）</h3>
+  <div class="card">
+    <p>
+      実装側が自前のエラー型を作る場合、<code>NotFound() bool</code> を実装して自己申告する。
+      AWS SDK v2 の <code>ErrorFault()</code> や gRPC の <code>codes.NotFound</code> と同じ思想。
+    </p>
+<pre><code>type NotFoundReporter interface {
+    error
+    NotFound() bool
+}
+
+type articleNotFoundError struct{ id string }
+func (e *articleNotFoundError) NotFound() bool { return true }</code></pre>
+    <p class="ref">参照: <a href="https://github.com/aws/aws-sdk-go-v2/blob/main/service/dynamodb/types/errors.go"><code>github.com/aws/aws-sdk-go-v2/service/dynamodb/types/errors.go</code></a> (ErrorCode / ErrorFault), <a href="https://github.com/kubernetes/apimachinery/blob/master/pkg/api/errors/errors.go"><code>k8s.io/apimachinery/pkg/api/errors/errors.go</code></a> (IsNotFound は StatusError を errors.As で判定)</p>
+  </div>
+
+  <h3>3.5 シグネチャで強制（方法4/5）</h3>
+  <div class="card">
+    <p>
+      <code>Exists</code>（存在確認）と <code>Lookup</code>（comma ok）をインターフェースに含める。
+      実装側はメソッド実装によって「無いことをどう表現するか」を強制される。
+    </p>
+<pre><code>type UserStore interface {
+    Get(ctx, id) (*User, error)
+    Exists(ctx, id) (bool, error)           // 方法4: 存在確認を分離
+    Lookup(ctx, id) (*User, bool, error)    // 方法5: comma ok を強制
+}</code></pre>
+    <p>
+      純粋な comma ok <code>(T, bool)</code> は「エラーが起こり得ない操作」（map アクセスなど）に向く。
+      DB/Redis のような失敗しうる操作では <code>(T, bool, error)</code> にして、
+      NotFound だけを <code>false</code> で表現しつつエラーを伝搬させる。
+    </p>
+    <p class="ref">参照: <a href="https://github.com/golang/go/blob/master/src/sync/map.go"><code>go/src/sync/map.go</code></a> (Map.Load), <a href="https://github.com/golang/go/blob/master/src/os/env.go"><code>go/src/os/env.go</code></a> (LookupEnv), <a href="https://github.com/spf13/viper/blob/master/viper.go"><code>github.com/spf13/viper/viper.go</code></a> (IsSet), <a href="https://github.com/redis/go-redis/blob/master/commands.go"><code>github.com/redis/go-redis/v9/commands.go</code></a> (Exists)</p>
+  </div>
+
+  <h3>3.6 3契約を横断判定する <code>IsNotFound</code></h3>
+  <div class="card">
+    <p>
+      呼び出し側は1つの関数で3系統の実装を判定できる。
+    </p>
+<pre><code>func IsNotFound(err error) bool {
+    if errors.Is(err, ErrNotFound) { return true }       // 方法1: センチネル
+    var nf *NotFoundError
+    if errors.As(err, &nf) { return true }               // 方法2: 型付き
+    var r NotFoundReporter
+    if errors.As(err, &r) && r.NotFound() { return true } // 方法3: 自己申告
+    return false
+}</code></pre>
+    <p class="ref">参考: <a href="https://github.com/kubernetes/apimachinery/blob/master/pkg/api/errors/errors.go"><code>k8s.io/apimachinery/pkg/api/errors/errors.go</code></a> (IsNotFound は errors.As ベースの横断判定)</p>
+  </div>
+
+  <h3>3.7 conformance 契約テスト（方法6）</h3>
+  <div class="card">
+    <p>
+      静的には「実装が契約を守るか」を強制できないため、テストで担保する。
+      全実装を同一テストに通すことで、差し替えても挙動が変わらないことを保証する。
+    </p>
+<pre><code>func AssertUserStore(store UserStore, missingID string) error {
+    if _, err := store.Get(ctx, missingID); !IsNotFound(err) {
+        return fmt.Errorf("Get must return NotFound, got %v", err)
+    }
+    if exists, err := store.Exists(ctx, missingID); err != nil || exists {
+        return fmt.Errorf("Exists must be (false, nil), got (%v, %v)", exists, err)
+    }
+    if u, ok, err := store.Lookup(ctx, missingID); err != nil || ok {
+        return fmt.Errorf("Lookup must be (nil, false, nil), got (%v, %v, %v)", u, ok, err)
+    }
+    return nil
+}</code></pre>
+    <div class="note">
+      <strong>ポイント</strong>
+      実運用では <code>AssertUserStore</code> は <code>_test.go</code> に置き、各実装に対して同じテストを適用する。
+    </div>
+    <p class="ref">参考: Go 標準ライブラリでは <a href="https://github.com/golang/go/tree/master/src/database/sql"><code>database/sql</code></a> driver tests 等で、同一 interface を実装する複数ドライバーに対して同じ conformance test を適用する形で使われている。</p>
+  </div>
+
+  <h2>4. パターン比較表</h2>
+  <div class="card">
+    <table>
+      <thead>
+        <tr><th>パターン</th><th>判定方法</th><th>メリット</th><th>デメリット</th><th>代表例</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>センチネルエラー</td>
+          <td><code>errors.Is(err, ErrNotFound)</code></td>
+          <td>シンプル、広く使われている</td>
+          <td>メタデータを持てない</td>
+          <td>sql.ErrNoRows, gorm.ErrRecordNotFound, redis.Nil</td>
+        </tr>
+        <tr>
+          <td>型付きエラー</td>
+          <td><code>errors.As(err, &amp;NotFoundError{})</code></td>
+          <td>メタデータ保持、詳細なメッセージ</td>
+          <td>型が増える</td>
+          <td>k8s StatusError, ent NotFoundError</td>
+        </tr>
+        <tr>
+          <td>ErrorCode/Fault</td>
+          <td><code>err.ErrorCode()</code></td>
+          <td>分散システム/エラー分類に強い</td>
+          <td>実装が少し重い</td>
+          <td>AWS SDK v2</td>
+        </tr>
+        <tr>
+          <td><code>Is</code> メソッドマッピング</td>
+          <td><code>errors.Is(err, fs.ErrNotExist)</code></td>
+          <td>低レイヤーコードをドメイン概念に昇華</td>
+          <td>マッピングルールの管理が必要</td>
+          <td>syscall.Errno</td>
+        </tr>
+        <tr>
+          <td>MaskNotFound</td>
+          <td><code>err == nil</code></td>
+          <td>存在確認をエラー処理から切り離せる</td>
+          <td>本当のエラーも消える可能性</td>
+          <td>ent</td>
+        </tr>
+        <tr>
+          <td>comma ok</td>
+          <td><code>v, ok := ...</code></td>
+          <td>Go 的、簡潔</td>
+          <td>エラー詳細が失われる</td>
+          <td>os.LookupEnv, sync.Map.Load</td>
+        </tr>
+        <tr>
+          <td>Option 型</td>
+          <td><code>opt.IsNone()</code></td>
+          <td>型安全性が高い、関数合成しやすい</td>
+          <td>チーム内の習熟が必要</td>
+          <td>samber/mo</td>
+        </tr>
+        <tr>
+          <td>存在確認 API</td>
+          <td><code>Exists(ctx, id)</code></td>
+          <td>意図が明確</td>
+          <td>取得のたびに2回アクセスになる</td>
+          <td>viper.IsSet</td>
+        </tr>
+        <tr>
+          <td>空コレクション</td>
+          <td><code>len(items) == 0</code></td>
+          <td>一覧取得に自然</td>
+          <td>単一取得には使えない</td>
+          <td>mongo Find</td>
+        </tr>
+        <tr>
+          <td>番兵値</td>
+          <td><code>idx == -1</code>, <code>n == 0</code></td>
+          <td>軽量</td>
+          <td>値域が奪われる、分かりにくい</td>
+          <td>strings.Index, redis EXISTS</td>
+        </tr>
+        <tr>
+          <td>Null 型</td>
+          <td><code>!ns.Valid</code></td>
+          <td>値の有無を表現しやすい</td>
+          <td>取り回しが面倒</td>
+          <td>sql.NullString</td>
+        </tr>
+        <tr>
+          <td>HTTP helper</td>
+          <td><code>http.NotFound(w, r)</code></td>
+          <td>HTTP 層に最適</td>
+          <td>HTTP 以外では使えない</td>
+          <td>net/http</td>
+        </tr>
+        <tr>
+          <td>センチネル契約（interface）</td>
+          <td><code>errors.Is(err, ErrNotFound)</code></td>
+          <td>実装が文脈を自由に付与</td>
+          <td>静的契約はコメント/テストに依存</td>
+          <td>gorm</td>
+        </tr>
+        <tr>
+          <td>型付きエラー契約（interface）</td>
+          <td><code>errors.As(err, &amp;NotFoundError{})</code></td>
+          <td>メタデータ契約も含められる</td>
+          <td>実装の自由度が下がる</td>
+          <td>ent</td>
+        </tr>
+        <tr>
+          <td>自己申告契約（interface）</td>
+          <td><code>err.(NotFoundReporter).NotFound()</code></td>
+          <td>自前のエラー型を許容しつつ統一判定</td>
+          <td>interface 実装が必要</td>
+          <td>AWS SDK v2 (smithy)</td>
+        </tr>
+        <tr>
+          <td>Exists/Lookup シグネチャ強制</td>
+          <td><code>store.Exists()</code> / <code>store.Lookup()</code></td>
+          <td>シグネチャが契約そのもの</td>
+          <td>全実装にメソッドを強制。<code>(T, bool)</code> はエラーを握り潰すので、失敗しうる操作では <code>(T, bool, error)</code> が必要</td>
+          <td>viper.IsSet, sync.Map.Load</td>
+        </tr>
+        <tr>
+          <td>conformance テスト</td>
+          <td><code>AssertUserStore(store, ...)</code></td>
+          <td>契約をテストで担保</td>
+          <td>テスト維持コスト</td>
+          <td>—</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>5. 使い分けの指針</h2>
+  <div class="card">
+    <ul>
+      <li><strong>ドメイン/データ層の失敗を呼び出し側に知らせたい</strong> → センチネルエラーまたは型付きエラー。</li>
+      <li><strong>エラーに原因やリソース名を含めたい</strong> → 型付きエラー (<code>NotFoundError</code>)。</li>
+      <li><strong>マイクロサービス/外部 API でエラーを分類したい</strong> → <code>ErrorCode()</code> / <code>ErrorFault()</code> 付き。</li>
+      <li><strong>存在確認だけで「無い」ことを正常値としたい</strong> → comma ok / Option / <code>Exists</code> / <code>MaskNotFound</code>。</li>
+      <li><strong>一覧取得</strong> → 空コレクションを返す。</li>
+      <li><strong>HTTP 層の最終出力</strong> → <code>http.NotFound</code> または <code>ToHTTPStatus</code>。</li>
+      <li><strong>実装を差し替え可能にしたい</strong> → インターフェース + <code>IsNotFound</code> による統一判定。</li>
+      <li><strong>インターフェース契約を守らせたい</strong> → <code>AssertXxx</code> による conformance テスト。</li>
+    </ul>
+  </div>
+
+  <h2>6. まとめ</h2>
+  <div class="card">
+    <p>
+      NotFound は「エラー」として扱うか、「値の不在」として扱うかで実装が大きく変わる。
+      Go では <code>errors.Is</code> / <code>errors.As</code> によるエラー判定が標準的だが、
+      <code>comma ok</code>、<code>Option[T]</code>、空コレクション、番兵値、Null 型など、
+      エラー型を使わない選択肢も豊富にある。
+    </p>
+    <p>
+      さらに、インターフェースを挟めば「NotFound の表現」を実装側に押し付け、
+      呼び出し側をシンプルに保つこともできる。
+      重要なのは、ライブラリやレイヤーごとに一貫したルールを決め、
+      呼び出し側が「見つからない」ことを予測可能に検知できるようにすること。
+    </p>
+  </div>
+
+  <div class="footer">
+    <p>対象コード: <code>internal/handle-not-found/main.go</code></p>
+  </div>
+</div>
+</body>
+</html>
