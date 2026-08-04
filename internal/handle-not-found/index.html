@@ -140,6 +140,37 @@
     </p>
   </div>
 
+  <div class="card">
+    <h2>なぜパターンが多様なのか</h2>
+    <p>
+      Rob Pike のブログ記事
+      <a href="https://go.dev/blog/errors-are-values">"Errors are values"</a>
+      は、Go のエラーは「毎回 <code>if err != nil</code> する対象」ではなく、
+      <strong>プログラム可能な値</strong>であると説いている。
+    </p>
+    <p>
+      この思想は NotFound にも当てはまる。
+      「見つからない」という状況を表現するために、必ずしも <code>error</code> 型を使う必要はない。
+      <code>bool</code>、<code>Option[T]</code>、空スライス、番兵値など、値として表現する選択肢もある。
+    </p>
+    <p>
+      標準ライブラリでも同じ発想が見られる。
+      <code>bufio.Scanner.Scan()</code> は <code>bool</code> を返し、エラーは <code>Err()</code> で後から取得する。
+      <code>os.LookupEnv</code> は <code>(string, bool)</code> を返す。
+      これらは「エラーではなく値として結果を返す」という、同じ設計思想の表れである。
+    </p>
+    <p>
+      本章で紹介するパターンは、すべて「エラーも値の一種であり、値として設計できる」という原則の上に成り立っている。
+      どのパターンを選ぶかは、その場面でどちらがクライアントコードをシンプルにするかで決まる。
+    </p>
+
+    <p class="ref">
+      参照: <a href="https://go.dev/blog/errors-are-values"><code>go.dev/blog/errors-are-values</code></a> (Rob Pike, 2015),
+      <a href="https://github.com/golang/go/blob/master/src/bufio/scan.go"><code>bufio/scan.go</code></a>,
+      <a href="https://github.com/golang/go/blob/master/src/os/env.go"><code>os/env.go</code></a>
+    </p>
+  </div>
+
   <h2>1. エラー型を使う表現</h2>
   <p>
     大半のライブラリは「見つからなかった」ことをエラー値として返す。
