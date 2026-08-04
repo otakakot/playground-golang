@@ -211,32 +211,118 @@ func (err *NotFoundError) ErrorFault() ErrorFault {
     <p class="ref">参照: <a href="https://github.com/aws/aws-sdk-go-v2/blob/main/service/dynamodb/types/errors.go"><code>github.com/aws/aws-sdk-go-v2/service/dynamodb/types/errors.go</code></a> (ResourceNotFoundException 等), <a href="https://github.com/awslabs/smithy-go"><code>smithy-go</code></a></p>
   </div>
 
-  <h3>1.4 <code>Is</code> メソッドでのエラーコード → ドメイン概念のマッピング</h3>
+  <h3>1.4 <code>errors.Is</code> を拡張する <code>Is</code> メソッド</h3>
   <div class="card">
     <p>
-      標準ライブラリの <code>syscall.Errno.Is</code> と同じ思想。
-      低レイヤーのエラーコードを高レイヤーのドメイン概念にマッピングする。
+      Go 1.13 で追加された <code>errors.Is</code> は、単なる <code>err == target</code> ではなく、
+      エラー連鎖の中から <code>target</code> と「等価」とみなせるエラーを探します。
+      等価判定の最後の一手として、連鎖上の各エラーが <code>Is(target error) bool</code> メソッドを実装していれば、
+      その結果も尊重されます。
       <span class="badge badge-oss">syscall.Errno</span>
     </p>
+
+    <h4>動作の流れ</h4>
+<pre><code>errors.Is(err, ErrNotFound)
+// 1. err == ErrNotFound ?
+// 2. err.Unwrap() して連鎖をたどる
+// 3. 連鎖の各エラーが Is(ErrNotFound) を実装していれば呼び出す
+// 4. どこかで true が返れば全体として true</code></pre>
+
+    <h4>実装例</h4>
     <p>
-      例: <code>ENOENT</code> は <code>fs.ErrNotExist</code> と等価、<code>EACCES</code>/<code>EPERM</code> は <code>fs.ErrPermission</code> と等価。
+      型付きエラー <code>NotFoundError</code> に <code>Is</code> メソッドを実装すると、
+      <code>errors.Is(err, ErrNotFound)</code> が true になります。
+      これにより呼び出し側は「センチネルか型付きか」を意識せずに判定できます。
     </p>
-<pre><code>func (err *NotFoundError) Is(target error) bool {
-    if target == ErrNotFound {
-        return true
-    }
-    t, ok := target.(*NotFoundError)
-    if !ok {
-        return false
-    }
-    return err.Resource == t.Resource
+<pre><code>var ErrNotFound = errors.New("not found")
+
+type NotFoundError struct {
+    Resource string
+    Name     string
 }
+
+// NotFoundError を ErrNotFound と等価だと宣言する
+func (err *NotFoundError) Is(target error) bool {
+    return target == ErrNotFound
+}
+
+// 利用例
+err := NewNotFoundError("user", "123")
+errors.Is(err, ErrNotFound) // true
 </code></pre>
+
+    <h4>なぜ <code>Is</code> メソッドなのか</h4>
     <p>
-      <code>main.go</code> では PostgreSQL の <code>SQLSTATE 42P01</code>（undefined_table）を
-      <code>MapPQError</code> で <code>NotFoundError</code> に変換している。
+      センチネルエラーだけを使う場合、ライブラリが独自の型付きエラーを返してくると、
+      呼び出し側は <code>errors.As</code> を使って型を確認する必要があります。
+      <code>Is</code> メソッドを実装しておけば、ライブラリ側が「このエラーは <code>ErrNotFound</code> と同じ種類です」と宣言できるため、
+      呼び出し側は <code>errors.Is(err, ErrNotFound)</code> だけで済みます。
     </p>
-    <p class="ref">参照: <a href="https://github.com/golang/go/blob/master/src/syscall/syscall_unix.go"><code>go/src/syscall/syscall_unix.go</code></a> (Errno.Is), <a href="https://github.com/lib/pq/blob/master/error.go"><code>github.com/lib/pq/error.go</code></a> (*Error.SQLState)</p>
+
+    <h4>標準ライブラリの例: <code>syscall.Errno.Is</code></h4>
+    <p>
+      <code>syscall.Errno</code> は、低レイヤーの errno を高レイヤーの <code>io/fs</code> センチネルと等価だと判定します。
+      これにより <code>errors.Is(syscall.ENOENT, fs.ErrNotExist)</code> が true になります。
+    </p>
+<pre><code>errors.Is(syscall.ENOENT, fs.ErrNotExist)   // true: ENOENT は「存在しない」と等価
+errors.Is(syscall.EACCES, fs.ErrPermission) // true: アクセス権エラーと等価</code></pre>
+
+    <h4><code>Is</code> と <code>As</code> の使い分け</h4>
+    <table>
+      <thead>
+        <tr><th>メソッド</th><th>目的</th><th>例</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>Is</code></td>
+          <td>「同じ種類のエラーか」を判定</td>
+          <td><code>errors.Is(err, ErrNotFound)</code></td>
+        </tr>
+        <tr>
+          <td><code>As</code></td>
+          <td>特定の型として取り出してフィールドを見る</td>
+          <td><code>errors.As(err, &amp;nfe)</code></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="note">
+      <strong>注意:</strong> リソース名や ID などのフィールドを確認したい場合は、
+      <code>Is</code> メソッド内で無理やり比較するのではなく、<code>errors.As</code> を使って
+      型を取り出してから判定する方が自然です。
+    </div>
+<pre><code>var nfe *NotFoundError
+if errors.As(err, &amp;nfe) &amp;&amp; nfe.Resource == "user" {
+    // ユーザーが見つからなかった場合の処理
+}</code></pre>
+
+    <p>
+      <code>Is</code> メソッドでフィールドを比較するスタイルは、
+      <code>errors.As</code> が標準化される前（Go 1.13 以前）によく使われていた旧実装です。
+      現在は「等価性は <code>Is</code>、型の取り出しとフィールドアクセスは <code>As</code>」と使い分けるのが標準です。
+    </p>
+
+    <h4>低レイヤーエラーコードのマッピング</h4>
+    <p>
+      <code>Is</code> メソッドとは別に、PostgreSQL の <code>SQLSTATE 42P01</code>（undefined_table）のような
+      低レイヤーエラーコードをドメインエラーに変換したい場合は、
+      <code>MapPQError</code> のような変換関数を使います。
+      これは <code>Is</code> メソッドではなく、エラー生成時のマッピング処理です。
+    </p>
+<pre><code>func MapPQError(err error) error {
+    var pqErr *pq.Error
+    if !errors.As(err, &amp;pqErr) {
+        return err
+    }
+    switch pqErr.SQLState() {
+    case "42P01": // undefined_table
+        return fmt.Errorf("pq %s: %w", pqErr.SQLState(), NewNotFoundError("table", pqErr.Table))
+    default:
+        return err
+    }
+}</code></pre>
+
+    <p class="ref">参照: <a href="https://github.com/golang/go/blob/master/src/syscall/syscall_unix.go"><code>go/src/syscall/syscall_unix.go</code></a> (Errno.Is), <a href="https://github.com/golang/go/blob/master/src/errors/wrap.go"><code>go/src/errors/wrap.go</code></a> (errors.Is), <a href="https://github.com/lib/pq/blob/master/error.go"><code>github.com/lib/pq/error.go</code></a> (*Error.SQLState)</p>
   </div>
 
   <h3>1.5 MaskNotFound によるマスク</h3>
@@ -678,21 +764,9 @@ func (e *articleNotFoundError) NotFound() bool { return true }</code></pre>
     </table>
   </div>
 
-  <h2>5. 使い分けの指針</h2>
-  <div class="card">
-    <ul>
-      <li><strong>ドメイン/データ層の失敗を呼び出し側に知らせたい</strong> → センチネルエラーまたは型付きエラー。</li>
-      <li><strong>エラーに原因やリソース名を含めたい</strong> → 型付きエラー (<code>NotFoundError</code>)。</li>
-      <li><strong>マイクロサービス/外部 API でエラーを分類したい</strong> → <code>ErrorCode()</code> / <code>ErrorFault()</code> 付き。</li>
-      <li><strong>存在確認だけで「無い」ことを正常値としたい</strong> → comma ok / Option / <code>Exists</code> / <code>MaskNotFound</code>。</li>
-      <li><strong>一覧取得</strong> → 空コレクションを返す。</li>
-      <li><strong>HTTP 層の最終出力</strong> → <code>http.NotFound</code> または <code>ToHTTPStatus</code>。</li>
-      <li><strong>実装を差し替え可能にしたい</strong> → インターフェース + <code>IsNotFound</code> による統一判定。</li>
-      <li><strong>インターフェース契約を守らせたい</strong> → <code>AssertXxx</code> による conformance テスト。</li>
-    </ul>
-  </div>
+  <h2>5. 推奨と使い分け</h2>
 
-  <h2>6. デファクト・スタンダードな選択</h2>
+  <h3>5.1 デファクト・スタンダードな選択</h3>
   <div class="card">
     <p>
       Go における「見つからなかった」のデファクト・スタンダードは、<strong>センチネルエラー</strong>です。
@@ -727,9 +801,15 @@ func (e *NotFoundError) Error() string {
     return fmt.Sprintf("%s %s not found", e.Resource, e.ID)
 }
 
+// センチネル ErrNotFound との等価性を宣言
 func (e *NotFoundError) Is(target error) bool {
-    _, ok := target.(*NotFoundError)
-    return ok
+    return target == ErrNotFound
+}
+
+// フィールドが必要な場合は errors.As で取り出す
+var nfe *NotFoundError
+if errors.As(err, &amp;nfe) {
+    fmt.Println(nfe.Resource, nfe.ID)
 }</code></pre>
     <p><strong>推奨:</strong></p>
     <ul>
@@ -739,7 +819,21 @@ func (e *NotFoundError) Is(target error) bool {
     </ul>
   </div>
 
-  <h2>7. まとめ</h2>
+  <h3>5.2 使い分けの指針</h3>
+  <div class="card">
+    <ul>
+      <li><strong>ドメイン/データ層の失敗を呼び出し側に知らせたい</strong> → センチネルエラーまたは型付きエラー。</li>
+      <li><strong>エラーに原因やリソース名を含めたい</strong> → 型付きエラー (<code>NotFoundError</code>)。</li>
+      <li><strong>マイクロサービス/外部 API でエラーを分類したい</strong> → <code>ErrorCode()</code> / <code>ErrorFault()</code> 付き。</li>
+      <li><strong>存在確認だけで「無い」ことを正常値としたい</strong> → comma ok / Option / <code>Exists</code> / <code>MaskNotFound</code>。</li>
+      <li><strong>一覧取得</strong> → 空コレクションを返す。</li>
+      <li><strong>HTTP 層の最終出力</strong> → <code>http.NotFound</code> または <code>ToHTTPStatus</code>。</li>
+      <li><strong>実装を差し替え可能にしたい</strong> → インターフェース + <code>IsNotFound</code> による統一判定。</li>
+      <li><strong>インターフェース契約を守らせたい</strong> → <code>AssertXxx</code> による conformance テスト。</li>
+    </ul>
+  </div>
+
+  <h2>6. まとめ</h2>
   <div class="card">
     <p>
       NotFound は「エラー」として扱うか、「値の不在」として扱うかで実装が大きく変わる。

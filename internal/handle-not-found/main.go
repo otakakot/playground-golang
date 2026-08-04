@@ -82,19 +82,11 @@ func (err *NotFoundError) ErrorFault() ErrorFault {
 	return FaultClient
 }
 
-// Is メソッドの実装。ent の NotFoundError と同様にリソース単位で比較する。
-// センチネル ErrNotFound とも等価とみなすことで、errors.Is(err, ErrNotFound) でも判定できる。
+// Is メソッドの実装。NotFoundError を ErrNotFound と等価とみなす。
+// これにより errors.Is(err, ErrNotFound) で型付きエラーも判定できる。
+// フィールドの詳細を確認したい場合は errors.As を使う。
 func (err *NotFoundError) Is(target error) bool {
-	if target == ErrNotFound {
-		return true
-	}
-
-	t, ok := target.(*NotFoundError)
-	if !ok {
-		return false
-	}
-
-	return err.Resource == t.Resource
+	return target == ErrNotFound
 }
 
 // NotFoundReporter は実装側が自前の NotFound 型を定義する場合の契約 (方法3: 自己申告)。
