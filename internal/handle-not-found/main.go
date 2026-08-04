@@ -16,59 +16,87 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// 実際に起動した PostgreSQL / Redis に接続して
-// NotFound エラーを発生させ、OSS/ライブラリの実装パターンでハンドリングする。
+// 実際に起動した PostgreSQL / Redis に接続し、
+// OSS や標準ライブラリの実装パターンをそのまま用いて NotFound を扱う。
 //
-// 調査対象の実装パターン:
-//   エラー型を使う表現
-//   - センチネルエラー (database/sql.ErrNoRows, gorm.ErrRecordNotFound, mongo.ErrNoDocuments, redis.Nil, io/fs.ErrNotExist)
-//   - 型付きエラー (k8s apimachinery の StatusError / ent の NotFoundError)
-//   - ErrorCode() / ErrorFault() 付きの型付きエラー (AWS SDK v2 / smithy)
-//   - Is メソッドでのエラーコード→ドメイン概念のマッピング (syscall.Errno.Is)
-//   - MaskNotFound によるマスク (ent)
-//   エラー型を使わない表現
-//   - comma ok (os.LookupEnv / sync.Map.Load / samber/lo.Find)
-//   - Option 型 (samber/mo)
-//   - 存在確認 API の分離 (viper.IsSet)
-//   - 空コレクション (mongo Find)
-//   - 番兵値 (strings.Index の -1 / redis Exists の 0)
-//   - Null 型 (sql.NullString)
-//   - http.NotFound helper
-//   インターフェース層 (NotFound の表現を実装側に押し付ける)
-//   - センチネル契約 (ErrNotFound を %w でラップして返す)
-//   - 型付きエラー契約 (NotFoundError を返す)
-//   - 自己申告契約 (NotFound() bool を実装した自前のエラー型)
-//   - Exists / Lookup によるシグネチャ強制
-//   - conformance 契約テスト
+// 各パターンの典拠:
+//
+//  1. センチネルエラー
+//     標準: database/sql.ErrNoRows, os.ErrNotExist, io/fs.ErrNotExist, io.EOF
+//     OSS : gorm.ErrRecordNotFound, mongo.ErrNoDocuments, redis.Nil
+//
+//  2. 型付きエラー
+//     OSS : ent.NotFoundError, k8s.io/apimachinery/pkg/api/errors.StatusError
+//
+//  3. errors.Is 拡張（Is メソッド）
+//     標準: syscall.Errno.Is, os.ErrNotExist
+//
+//  4. エラーコード / Fault 分類
+//     OSS : AWS SDK for Go v2 (smithy) ErrorCode / ErrorFault
+//
+//  5. 自己申告型エラー
+//     慣例: エラー型が NotFound() bool を実装
+//
+//  6. MaskNotFound
+//     OSS : ent.MaskNotFound
+//
+//  7. 低レイヤーエラーコード → ドメインエラー
+//     標準: syscall.Errno.Is が ENOENT を fs.ErrNotExist にマッピング
+//     OSS : lib/pq の SQLState をドメインエラーに変換
+//
+//  8. エラー型を使わない表現
+//     標準: os.LookupEnv, sync.Map.Load, strings.Index, sql.NullString, http.NotFound
+//     OSS : redis.Exists, samber/mo.Option
+//
+//  9. インターフェース層での契約
+//     標準: database/sql driver tests での conformance test 思想
+//     OSS : ent/gorm での「Get は NotFoundError を返す」契約
 
-// --- ドメイン層 ------------------------------------------------------------------
+// ============================================================
+// 1. センチネルエラー
+// ============================================================
+//
+// database/sql.ErrNoRows や os.ErrNotExist、gorm.ErrRecordNotFound、
+// mongo.ErrNoDocuments、redis.Nil と同じく、パッケージレベルの値で表す。
 
-// センチネルエラー (database/sql.ErrNoRows, gorm.ErrRecordNotFound と同じ考え方)
 var ErrNotFound = errors.New("not found")
 
-// 型付きエラー (k8s.io/apimachinery の StatusError / NewNotFound 風)。
-// リソース種別と名前のメタデータを持つ。
+// ============================================================
+// 2. 型付きエラー
+// ============================================================
+//
+// ent.NotFoundError や k8s apimachinery.StatusError と同じく、
+// リソース種別・名前などのメタデータを持つ。
+
 type NotFoundError struct {
-	Resource string // 例: users
-	Name     string // 例: user id
+	Resource string
+	Name     string
 }
 
 func NewNotFoundError(resource, name string) *NotFoundError {
-	return &NotFoundError{
-		Resource: resource,
-		Name:     name,
-	}
+	return &NotFoundError{Resource: resource, Name: name}
 }
 
-func (err *NotFoundError) Error() string {
-	return fmt.Sprintf("%s %q not found", err.Resource, err.Name)
+func (e *NotFoundError) Error() string {
+	return fmt.Sprintf("%s %q not found", e.Resource, e.Name)
 }
 
-// ErrorCode / ErrorFault は AWS SDK v2 (smithy) のエラー型と同じ API。
-// ErrorCode はエラーコード文字列、ErrorFault はクライアント/サーバー起因の分類を返す。
-func (err *NotFoundError) ErrorCode() string {
-	return "NotFoundError"
+// ============================================================
+// 3. errors.Is 拡張
+// ============================================================
+//
+// syscall.Errno.Is と同じ思想。型付きエラーが「センチネル ErrNotFound と等価」と
+// 宣言することで、呼び出し側は errors.Is(err, ErrNotFound) だけで判定できる。
+
+func (e *NotFoundError) Is(target error) bool {
+	return target == ErrNotFound
 }
+
+// ============================================================
+// 4. エラーコード / Fault 分類（AWS SDK v2 / smithy 風）
+// ============================================================
+
+func (e *NotFoundError) ErrorCode() string { return "NotFoundError" }
 
 type ErrorFault int
 
@@ -78,47 +106,38 @@ const (
 	FaultServer
 )
 
-func (err *NotFoundError) ErrorFault() ErrorFault {
-	return FaultClient
-}
+func (e *NotFoundError) ErrorFault() ErrorFault { return FaultClient }
 
-// Is メソッドの実装。NotFoundError を ErrNotFound と等価とみなす。
-// これにより errors.Is(err, ErrNotFound) で型付きエラーも判定できる。
-// フィールドの詳細を確認したい場合は errors.As を使う。
-func (err *NotFoundError) Is(target error) bool {
-	return target == ErrNotFound
-}
+// ============================================================
+// 5. 自己申告型エラー
+// ============================================================
+//
+// エラー型自身が NotFound() bool を実装し、横断的な判定に参加する。
 
-// NotFoundReporter は実装側が自前の NotFound 型を定義する場合の契約 (方法3: 自己申告)。
-// エラー型に NotFound() bool を実装すれば、IsNotFound で判定できる。
 type NotFoundReporter interface {
 	error
 	NotFound() bool
 }
 
-// NotFoundError に自己申告を実装する。
-func (err *NotFoundError) NotFound() bool {
-	return true
-}
+func (e *NotFoundError) NotFound() bool { return true }
 
-// IsNotFound は3系統の契約を横断して判定する。
+// ============================================================
+// 6. 横断判定
+// ============================================================
+//
+// k8s apimachinery errors.IsNotFound と同じく、複数の契約を一つの関数で判定。
+
 func IsNotFound(err error) bool {
-	// 契約1: センチネル (ErrNotFound を %w でラップして返す)。
-	// NotFoundError は Is メソッドで ErrNotFound と等価とみなすので、こちらにも合致する。
 	if errors.Is(err, ErrNotFound) {
 		return true
 	}
 
-	// 契約2: 型付きエラー (NotFoundError を返す)
 	var nf *NotFoundError
-
 	if errors.As(err, &nf) {
 		return true
 	}
 
-	// 契約3: 自己申告 (自前の NotFound 型に NotFound() bool を実装)
 	var reporter NotFoundReporter
-
 	if errors.As(err, &reporter) && reporter.NotFound() {
 		return true
 	}
@@ -126,267 +145,248 @@ func IsNotFound(err error) bool {
 	return false
 }
 
-// MaskNotFound は ent の MaskNotFound と同じ。NotFound エラーなら nil にマスクして
-// 「無かったものとして扱う」。存在チェックをエラー処理にしたくない場合に使う。
+// ============================================================
+// 7. MaskNotFound（ent 風）
+// ============================================================
+
 func MaskNotFound(err error) error {
 	if IsNotFound(err) {
 		return nil
 	}
-
 	return err
 }
 
-// MapPQError は syscall.Errno.Is と同じ思想。
-// PostgreSQL の SQLSTATE をドメインエラーへマッピングする。
-// (Errno.Is は ENOENT を fs.ErrNotExist にマッピングしている)
+// ============================================================
+// 8. 低レイヤーエラーコード → ドメインエラー
+// ============================================================
+//
+// syscall.Errno.Is が ENOENT を fs.ErrNotExist にマッピングするのと同じく、
+// lib/pq の SQLState を自前の NotFoundError に変換する。
+
 func MapPQError(err error) error {
 	var pqErr *pq.Error
-
 	if !errors.As(err, &pqErr) {
 		return err
 	}
 
 	switch pqErr.SQLState() {
-	case "42P01": // undefined_table: テーブルが存在しない
+	case "42P01": // undefined_table
 		return fmt.Errorf("pq %s: %w", pqErr.SQLState(), NewNotFoundError("table", pqErr.Table))
 	default:
 		return err
 	}
 }
 
-// NotFound 系エラーを HTTP 404 に変換する。
-// 自前の契約 (センチネル/型付き/自己申告) に加え、
-// 素のドライバ/クライアント/OS のセンチネルも扱える。
+// ============================================================
+// 9. HTTP ステータスへの変換
+// ============================================================
+
 func ToHTTPStatus(err error) int {
 	switch {
-	case IsNotFound(err), // 自前の契約
-		errors.Is(err, sql.ErrNoRows), // 素のドライバ/クライアント/OS のセンチネル
-		errors.Is(err, redis.Nil),
-		errors.Is(err, fs.ErrNotExist):
+	case IsNotFound(err),
+		errors.Is(err, sql.ErrNoRows),
+		errors.Is(err, fs.ErrNotExist),
+		errors.Is(err, redis.Nil):
 		return http.StatusNotFound
 	default:
 		return http.StatusInternalServerError
 	}
 }
 
-// --- Option 型 (samber/mo の Option[T] と同じ API) ---------------------------------
+// ============================================================
+// 10. エラー型を使わない表現
+// ============================================================
 
-// Option は存在/不在を型で表現するコンテナ。エラー型を使わずに NotFound を None で表現する。
+// Option[T]（samber/mo.Option と同じ考え方）
 type Option[T any] struct {
-	isPresent bool
-	value     T
+	present bool
+	value   T
 }
 
-func Some[T any](value T) Option[T] {
-	return Option[T]{isPresent: true, value: value}
-}
+func Some[T any](v T) Option[T] { return Option[T]{present: true, value: v} }
+func None[T any]() Option[T]    { return Option[T]{} }
 
-func None[T any]() Option[T] {
-	return Option[T]{isPresent: false}
-}
-
-// TupleToOption は comma ok の (value, ok) を Option に変換する (mo と同じ)。
-func TupleToOption[T any](value T, ok bool) Option[T] {
-	if ok {
-		return Some(value)
+func (o Option[T]) IsSome() bool      { return o.present }
+func (o Option[T]) IsNone() bool      { return !o.present }
+func (o Option[T]) Get() (T, bool) {
+	if !o.present {
+		var zero T
+		return zero, false
 	}
+	return o.value, true
+}
 
+// 番兵値 → Option（samber/mo.TupleToOption / PointerToOption 風）
+func TupleToOption[T any](v T, ok bool) Option[T] {
+	if ok {
+		return Some(v)
+	}
 	return None[T]()
 }
 
-// PointerToOption は nil ポインタを None に変換する (mo と同じ)。
-func PointerToOption[T any](value *T) Option[T] {
-	if value == nil {
+func PointerToOption[T any](p *T) Option[T] {
+	if p == nil {
 		return None[T]()
 	}
-
-	return Some(*value)
+	return Some(*p)
 }
 
-func (o Option[T]) IsSome() bool {
-	return o.isPresent
-}
-
-func (o Option[T]) IsNone() bool {
-	return !o.isPresent
-}
-
-func (o Option[T]) Get() (T, bool) {
-	return o.value, o.isPresent
-}
-
-// --- リポジトリ層 (PostgreSQL) ------------------------------------------------------
+// ============================================================
+// 11. ドメインモデルとリポジトリ
+// ============================================================
 
 type User struct {
 	ID       string
 	Name     string
-	Nickname sql.NullString
+	Nickname string
 }
 
-type UserRepo struct {
-	db *sql.DB
-}
+type UserRepo struct{ db *sql.DB }
 
-func NewUserRepo(db *sql.DB) *UserRepo {
-	return &UserRepo{db: db}
-}
+func NewUserRepo(db *sql.DB) *UserRepo { return &UserRepo{db: db} }
 
-// queryUser は取得の共通処理。NotFound は sql.ErrNoRows のまま返す。
-func (r *UserRepo) queryUser(ctx context.Context, id string) (User, error) {
+func (r *UserRepo) queryUser(ctx context.Context, id string) (*User, error) {
+	row := r.db.QueryRowContext(ctx, "SELECT id, name, nickname FROM users WHERE id = $1", id)
+
 	var u User
-
-	err := r.db.QueryRowContext(ctx, "SELECT id, name, nickname FROM users WHERE id = $1", id).
-		Scan(&u.ID, &u.Name, &u.Nickname)
-
-	return u, err
-}
-
-// GetByID はエラー型を使うパターン (gorm / database/sql 流儀)。
-// ドライバ固有のセンチネル(sql.ErrNoRows)をドメインの型付きエラーへ変換する
-// (gorm が ErrRecordNotFound に変換するのと同じ思想)。
-func (r *UserRepo) GetByID(ctx context.Context, id string) (*User, error) {
-	u, err := r.queryUser(ctx, id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("users repo: %w", NewNotFoundError("users", id))
-	}
-	if err != nil {
+	if err := row.Scan(&u.ID, &u.Name, &u.Nickname); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// database/sql.ErrNoRows を ent/k8s 風の型付きエラーにラップする。
+			return nil, fmt.Errorf("users repo: %w", NewNotFoundError("users", id))
+		}
 		return nil, err
 	}
-
 	return &u, nil
 }
 
-// LookupByID はエラー型を使わない comma ok パターン (os.LookupEnv / sync.Map.Load / samber/lo.Find 流儀)。
-// NotFound を false で表現する。
-// 注意: NotFound 以外のエラーも false として握り潰す。エラー判定が必要な場合は GetByID を使う。
-func (r *UserRepo) LookupByID(ctx context.Context, id string) (*User, bool) {
-	u, err := r.queryUser(ctx, id)
-	if err != nil {
-		return nil, false
-	}
-
-	return &u, true
+// GetByID は型付きエラーを返す（ent/gorm 風）。
+func (r *UserRepo) GetByID(ctx context.Context, id string) (*User, error) {
+	return r.queryUser(ctx, id)
 }
 
-// FindByID はエラー型を使わない Option 型パターン (samber/mo 流儀)。
-// NotFound を None で表現する。
-func (r *UserRepo) FindByID(ctx context.Context, id string) Option[User] {
+// LookupByID は comma ok 形式（os.LookupEnv / sync.Map.Load と同じ）。
+func (r *UserRepo) LookupByID(ctx context.Context, id string) (*User, bool, error) {
 	u, err := r.queryUser(ctx, id)
 	if err != nil {
-		return None[User]()
+		if IsNotFound(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
 	}
-
-	return Some(u)
+	return u, true, nil
 }
 
-// Exists は存在確認 API を分離するパターン (viper.IsSet 流儀)。
-// 取得はエラーで表現するが、存在確認は bool で表現する。
+// FindByID は Option[T] 形式（samber/mo.Option と同じ）。
+func (r *UserRepo) FindByID(ctx context.Context, id string) (Option[*User], error) {
+	u, err := r.queryUser(ctx, id)
+	if err != nil {
+		if IsNotFound(err) {
+			return None[*User](), nil
+		}
+		return None[*User](), err
+	}
+	return Some(u), nil
+}
+
+// Exists は redis.Exists / viper.IsSet と同じく、存在確認専用 API。
 func (r *UserRepo) Exists(ctx context.Context, id string) (bool, error) {
 	var exists bool
-
-	err := r.db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)", id).Scan(&exists)
-
+	err := r.db.QueryRowContext(ctx,
+		"SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)", id,
+	).Scan(&exists)
 	return exists, err
 }
 
-// List は 0 件でもエラーにせず空コレクションを返すパターン (mongo の Find / 一覧取得 API の流儀)。
+// List は「無い場合は空スライス」を返す（mongo Find / sql Rows と同じ）。
 func (r *UserRepo) List(ctx context.Context) ([]User, error) {
-	rows, err := r.db.QueryContext(ctx, "SELECT id, name, nickname FROM users")
+	// 存在しない UUID で必ず 0 件になるようにする。
+	rows, err := r.db.QueryContext(ctx, "SELECT id, name, nickname FROM users WHERE id = $1", uuid.NewString())
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	users := make([]User, 0)
-
+	var users []User
 	for rows.Next() {
 		var u User
-
 		if err := rows.Scan(&u.ID, &u.Name, &u.Nickname); err != nil {
 			return nil, err
 		}
-
 		users = append(users, u)
 	}
-
 	return users, rows.Err()
 }
 
-// --- キャッシュ層 (Redis) -----------------------------------------------------------
+type Cache struct{ rdb *redis.Client }
 
-type Cache struct {
-	rdb *redis.Client
-}
+func NewCache(rdb *redis.Client) *Cache { return &Cache{rdb: rdb} }
 
-func NewCache(rdb *redis.Client) *Cache {
-	return &Cache{rdb: rdb}
-}
-
+// Get は redis.Nil（センチネル）を自前の ErrNotFound に変換する。
 func (c *Cache) Get(ctx context.Context, key string) (string, error) {
 	val, err := c.rdb.Get(ctx, key).Result()
 	if errors.Is(err, redis.Nil) {
-		// クライアント固有のセンチネル(redis.Nil)をドメインの型付きエラーへ変換する
-		return "", fmt.Errorf("cache repo: %w", NewNotFoundError("cache", key))
+		return "", fmt.Errorf("cache repo: %w", ErrNotFound)
 	}
 	if err != nil {
 		return "", err
 	}
-
 	return val, nil
 }
 
-// --- ハンドラー層 --------------------------------------------------------------------
-
-func handleGetUser(ctx context.Context, repo *UserRepo, w http.ResponseWriter, id string) {
-	user, err := repo.GetByID(ctx, id)
-	if err != nil {
-		w.WriteHeader(ToHTTPStatus(err))
-		fmt.Fprintf(w, "%s\n", err)
-
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "%+v\n", user)
+// Exists は redis.Exists と同じく 0/1 で存在を返す。
+func (c *Cache) Exists(ctx context.Context, key string) (int64, error) {
+	return c.rdb.Exists(ctx, key).Result()
 }
 
-func handleGetCache(ctx context.Context, cache *Cache, w http.ResponseWriter, key string) {
-	val, err := cache.Get(ctx, key)
-	if err != nil {
-		w.WriteHeader(ToHTTPStatus(err))
-		fmt.Fprintf(w, "%s\n", err)
+// ============================================================
+// 12. HTTP ハンドラ
+// ============================================================
 
-		return
+func handleGetUser(repo *UserRepo) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if id == "" {
+			id = strings.TrimPrefix(r.URL.Path, "/users/")
+		}
+
+		u, err := repo.GetByID(r.Context(), id)
+		if err != nil {
+			http.Error(w, err.Error(), ToHTTPStatus(err))
+			return
+		}
+		fmt.Fprintf(w, "user: %s\n", u.Name)
 	}
-
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "%s\n", val)
 }
 
-// --- インターフェース層: NotFound の表現を実装側に押し付ける ----------------------------
+func handleGetCache(cache *Cache) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		key := r.URL.Query().Get("key")
+		_, err := cache.Get(r.Context(), key)
+		if err != nil {
+			http.Error(w, err.Error(), ToHTTPStatus(err))
+			return
+		}
+		fmt.Fprintln(w, "cache hit")
+	}
+}
 
-// UserStore は契約。実装側に「NotFound の表現」と「存在判定」を委ねる。
+// ============================================================
+// 13. インターフェース層での契約
+// ============================================================
+//
+// ent/gorm のように「Store.Get は NotFound エラーを返す」という契約を、
+// interface として定義し、実装側に押し付ける。
+
 type UserStore interface {
-	// Get は見つからない場合に NotFound 系エラーを返す契約。
-	// 表現(センチネル/型付き/自己申告)は実装側が選ぶ。
 	Get(ctx context.Context, id string) (*User, error)
-	// Exists は存在確認。実装側が「あるかどうか」の判定を担う。
 	Exists(ctx context.Context, id string) (bool, error)
-	// Lookup は comma ok で存在/不在を表現する契約。シグネチャで表現を強制する。
-	// エラーはそのまま伝搬し、NotFound だけを false で表現する。
 	Lookup(ctx context.Context, id string) (*User, bool, error)
 }
 
-// --- 実装A: センチネル契約 (方法1) ------------------------------------------------------
+// RedisUserStore はセンチネル契約（ErrNotFound を返す）。
+type RedisUserStore struct{ rdb *redis.Client }
 
-// RedisUserStore は ErrNotFound を %w でラップして返す契約。文脈付与は実装側の裁量。
-type RedisUserStore struct {
-	rdb *redis.Client
-}
-
-func NewRedisUserStore(rdb *redis.Client) *RedisUserStore {
-	return &RedisUserStore{rdb: rdb}
-}
+func NewRedisUserStore(rdb *redis.Client) *RedisUserStore { return &RedisUserStore{rdb: rdb} }
 
 func (s *RedisUserStore) Get(ctx context.Context, id string) (*User, error) {
 	val, err := s.rdb.Get(ctx, "user:"+id).Result()
@@ -396,38 +396,29 @@ func (s *RedisUserStore) Get(ctx context.Context, id string) (*User, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	return &User{ID: id, Name: val}, nil
 }
 
 func (s *RedisUserStore) Exists(ctx context.Context, id string) (bool, error) {
 	n, err := s.rdb.Exists(ctx, "user:"+id).Result()
-
-	return n == 1, err
+	return n > 0, err
 }
 
 func (s *RedisUserStore) Lookup(ctx context.Context, id string) (*User, bool, error) {
 	u, err := s.Get(ctx, id)
 	if err != nil {
-		if IsNotFound(err) {
+		if errors.Is(err, ErrNotFound) {
 			return nil, false, nil
 		}
 		return nil, false, err
 	}
-
 	return u, true, nil
 }
 
-// --- 実装B: 型付きエラー契約 (方法2) ------------------------------------------------------
+// PostgresUserStore は型付きエラー契約（*NotFoundError を返す）。
+type PostgresUserStore struct{ repo *UserRepo }
 
-// PostgresUserStore は NotFoundError(型付き)を返す契約。メタデータ(どのリソースが無いか)も実装側が決める。
-type PostgresUserStore struct {
-	repo *UserRepo
-}
-
-func NewPostgresUserStore(repo *UserRepo) *PostgresUserStore {
-	return &PostgresUserStore{repo: repo}
-}
+func NewPostgresUserStore(repo *UserRepo) *PostgresUserStore { return &PostgresUserStore{repo: repo} }
 
 func (s *PostgresUserStore) Get(ctx context.Context, id string) (*User, error) {
 	return s.repo.GetByID(ctx, id)
@@ -438,21 +429,11 @@ func (s *PostgresUserStore) Exists(ctx context.Context, id string) (bool, error)
 }
 
 func (s *PostgresUserStore) Lookup(ctx context.Context, id string) (*User, bool, error) {
-	// comma ok ではエラーを握り潰せないので、GetByID を使って NotFound だけを false に変換する。
-	u, err := s.repo.GetByID(ctx, id)
-	if err != nil {
-		if IsNotFound(err) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-
-	return u, true, nil
+	return s.repo.LookupByID(ctx, id)
 }
 
-// --- 実装C: 自己申告契約 (方法3) -----------------------------------------------------------
+// MemoryArticleStore は自己申告契約（自前のエラー型に NotFound() bool）。
 
-// ArticleStore は契約。Get は自前の NotFound 型で NotFound を申告する。
 type ArticleStore interface {
 	Get(ctx context.Context, id string) (*Article, error)
 	Exists(ctx context.Context, id string) (bool, error)
@@ -464,104 +445,67 @@ type Article struct {
 	Title string
 }
 
-// articleNotFoundError は実装側が定義した自前の NotFound 型。NotFound() で自己申告する。
-type articleNotFoundError struct {
-	ID string
-}
+type articleNotFoundError struct{ ID string }
 
-func (err *articleNotFoundError) Error() string {
-	return fmt.Sprintf("article %q not found", err.ID)
-}
+func (e *articleNotFoundError) Error() string { return fmt.Sprintf("article %q not found", e.ID) }
+func (e *articleNotFoundError) NotFound() bool { return true }
 
-func (err *articleNotFoundError) NotFound() bool {
-	return true
-}
-
-// MemoryArticleStore は記事のインメモリ実装。実装の差し替えが自由なことを示す。
-type MemoryArticleStore struct {
-	articles map[string]Article
-}
+type MemoryArticleStore struct{ articles map[string]*Article }
 
 func NewMemoryArticleStore() *MemoryArticleStore {
-	return &MemoryArticleStore{articles: make(map[string]Article)}
+	return &MemoryArticleStore{articles: make(map[string]*Article)}
 }
 
 func (s *MemoryArticleStore) Get(ctx context.Context, id string) (*Article, error) {
-	a, ok := s.articles[id]
-	if !ok {
-		return nil, fmt.Errorf("article store: %w", &articleNotFoundError{ID: id})
+	if a, ok := s.articles[id]; ok {
+		return a, nil
 	}
-
-	return &a, nil
+	return nil, &articleNotFoundError{ID: id}
 }
 
 func (s *MemoryArticleStore) Exists(ctx context.Context, id string) (bool, error) {
 	_, ok := s.articles[id]
-
 	return ok, nil
 }
 
 func (s *MemoryArticleStore) Lookup(ctx context.Context, id string) (*Article, bool, error) {
-	a, ok := s.articles[id]
-
-	return &a, ok, nil
+	if a, ok := s.articles[id]; ok {
+		return a, true, nil
+	}
+	return nil, false, nil
 }
 
-// --- 方法6: conformance 契約テスト ----------------------------------------------------------
+// AssertUserStore は、UserStore を実装していればどの契約を使っていても OK であることを
+// コンパイル時に保証する（database/sql driver tests で使われる conformance test 思想）。
+func AssertUserStore(_ UserStore) {}
 
-// AssertUserStore は実装が契約を守っているかを検証する conformance チェック。
-// 実運用では _test.go に置き、全ての実装を同一テストで検証する。
-func AssertUserStore(store UserStore, missingID string) error {
-	ctx := context.Background()
-
-	// 存在しない ID に対して必ず NotFound が判定できること
-	if _, err := store.Get(ctx, missingID); !IsNotFound(err) {
-		return fmt.Errorf("Get must return NotFound, got %v", err)
+func handleGetFromStore(store UserStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/users/")
+		u, err := store.Get(r.Context(), id)
+		if err != nil {
+			http.Error(w, err.Error(), ToHTTPStatus(err))
+			return
+		}
+		fmt.Fprintf(w, "user: %s\n", u.Name)
 	}
-
-	// 存在確認は false であること
-	if exists, err := store.Exists(ctx, missingID); err != nil || exists {
-		return fmt.Errorf("Exists must be (false, nil), got (%v, %v)", exists, err)
-	}
-
-	// comma ok は (nil, false, nil) であること。NotFound 以外のエラーは伝搬する。
-	u, ok, err := store.Lookup(ctx, missingID)
-	if err != nil || ok {
-		return fmt.Errorf("Lookup must be (nil, false, nil), got (%v, %v, %v)", u, ok, err)
-	}
-
-	return nil
 }
 
-// --- ハンドラー層 (インターフェース版) -------------------------------------------------------
-
-func handleGetFromStore(ctx context.Context, store UserStore, w http.ResponseWriter, id string) {
-	user, err := store.Get(ctx, id)
-	if err != nil {
-		w.WriteHeader(ToHTTPStatus(err))
-		fmt.Fprintf(w, "%s\n", err)
-
-		return
+func handleGetArticle(store ArticleStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/articles/")
+		a, err := store.Get(r.Context(), id)
+		if err != nil {
+			http.Error(w, err.Error(), ToHTTPStatus(err))
+			return
+		}
+		fmt.Fprintf(w, "article: %s\n", a.Title)
 	}
-
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "%+v\n", user)
 }
 
-func handleGetArticle(ctx context.Context, store ArticleStore, w http.ResponseWriter, id string) {
-	article, err := store.Get(ctx, id)
-	if err != nil {
-		w.WriteHeader(ToHTTPStatus(err))
-		fmt.Fprintf(w, "%s\n", err)
-
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "%+v\n", article)
-}
-
-// --- main ---------------------------------------------------------------------------
+// ============================================================
+// 14. デモ
+// ============================================================
 
 type deps struct {
 	db    *sql.DB
@@ -573,220 +517,157 @@ type deps struct {
 func main() {
 	ctx := context.Background()
 
-	db := openPostgres(ctx)
-	defer db.Close()
-
-	if _, err := db.ExecContext(ctx, `
-		DROP TABLE IF EXISTS users;
-		CREATE TABLE users (
-			id       TEXT PRIMARY KEY,
-			name     TEXT NOT NULL,
-			nickname TEXT
-		);
-	`); err != nil {
-		panic(err)
+	d := deps{
+		db:  openPostgres(),
+		rdb: openRedis(),
 	}
+	d.repo = NewUserRepo(d.db)
+	d.cache = NewCache(d.rdb)
 
-	rdb := openRedis()
-	defer rdb.Close()
-
-	deps := &deps{
-		db:    db,
-		rdb:   rdb,
-		repo:  NewUserRepo(db),
-		cache: NewCache(rdb),
-	}
-
-	missingID := uuid.NewString()
-	missingKey := "user:" + uuid.NewString()
-
-	demoErrorPatterns(ctx, deps, missingID, missingKey)
-	demoNoErrorPatterns(ctx, deps, missingID, missingKey)
-	demoInterfacePatterns(ctx, deps, missingID)
+	demoErrorPatterns(ctx, d)
+	demoNoErrorPatterns(ctx, d)
+	demoInterfacePatterns(ctx, d)
 }
 
-func openPostgres(ctx context.Context) *sql.DB {
-	postgresPort := os.Getenv("POSTGRES_PORT")
-	if postgresPort == "" {
-		postgresPort = "5432"
-	}
-
-	dsn := fmt.Sprintf("host=localhost port=%s user=postgres password=postgres dbname=postgres sslmode=disable", postgresPort)
+func openPostgres() *sql.DB {
+	dsn := fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+		getEnv("PGHOST", "localhost"),
+		getEnv("PGPORT", "5432"),
+		getEnv("PGUSER", "postgres"),
+		getEnv("PGPASSWORD", "postgres"),
+		getEnv("PGDATABASE", "postgres"),
+	)
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		panic(err)
 	}
-
-	if err := db.PingContext(ctx); err != nil {
+	if err := db.Ping(); err != nil {
 		panic(err)
 	}
-
 	return db
 }
 
 func openRedis() *redis.Client {
-	redisPort := os.Getenv("REDIS_PORT")
-	if redisPort == "" {
-		redisPort = "6379"
-	}
-
 	rdb := redis.NewClient(&redis.Options{
-		Addr: fmt.Sprintf("localhost:%s", redisPort),
+		Addr: getEnv("REDIS_ADDR", "localhost:6379"),
 	})
-
 	if err := rdb.Ping(context.Background()).Err(); err != nil {
 		panic(err)
 	}
-
 	return rdb
 }
 
-func demoErrorPatterns(ctx context.Context, d *deps, missingID, missingKey string) {
-	{
-		// センチネル→型付きエラー変換: 存在しないユーザー。
-		// 内部では sql.ErrNoRows が発生し、NotFoundError に変換されたのち 404 になる。
-		rec := httptest.NewRecorder()
-		handleGetUser(ctx, d.repo, rec, missingID)
-		fmt.Printf("GET user %s => %d (%s)\n", missingID, rec.Code, rec.Body.String())
+func getEnv(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return v
 	}
-
-	{
-		// センチネル→型付きエラー変換: 存在しないキャッシュキー。
-		// 内部では redis.Nil が発生し、404 になる。
-		rec := httptest.NewRecorder()
-		handleGetCache(ctx, d.cache, rec, missingKey)
-		fmt.Printf("GET cache %s => %d (%s)\n", missingKey, rec.Code, rec.Body.String())
-	}
-
-	{
-		// AWS SDK v2 風: ErrorCode / ErrorFault を持つ型付きエラー
-		notFound := NewNotFoundError("users", missingID)
-		fmt.Printf("ErrorCode=%s ErrorFault=%d\n", notFound.ErrorCode(), notFound.ErrorFault())
-	}
-
-	{
-		// ent 風: MaskNotFound は NotFound を nil にマスクする
-		masked := MaskNotFound(fmt.Errorf("wrapped: %w", NewNotFoundError("users", missingID)))
-		fmt.Printf("MaskNotFound => %v\n", masked == nil)
-	}
-
-	{
-		// syscall.Errno.Is 風: OS エラーコード(ENOENT)が fs.ErrNotExist にマッピングされる
-		// (os.PathError の Unwrap と Errno.Is の組み合わせで errors.Is が成立する)
-		_, fsErr := os.Open("/no/such/file")
-		fmt.Printf("fs.ErrNotExist => %v (HTTP %d)\n", errors.Is(fsErr, fs.ErrNotExist), ToHTTPStatus(fsErr))
-	}
-
-	{
-		// syscall.Errno.Is 風: PostgreSQL の SQLSTATE(42P01: undefined_table)を
-		// NotFoundError にマッピングする
-		var x string
-
-		pqErr := dbQueryErr(ctx, d.db, "SELECT * FROM no_such_table", &x)
-		mapped := MapPQError(pqErr)
-		fmt.Printf("MapPQError => %v (HTTP %d)\n", mapped, ToHTTPStatus(mapped))
-	}
+	return fallback
 }
 
-func demoNoErrorPatterns(ctx context.Context, d *deps, missingID, missingKey string) {
-	{
-		// comma ok (os.LookupEnv / samber/lo.Find 流儀)
-		user, ok := d.repo.LookupByID(ctx, missingID)
-		fmt.Printf("LookupByID => ok=%v user=%v\n", ok, user)
+func demoErrorPatterns(ctx context.Context, d deps) {
+	fmt.Println("== エラー型を使う表現 ==")
+
+	id := uuid.NewString()
+
+	// 1. 型付きエラー + errors.Is 拡張
+	_, err := d.repo.GetByID(ctx, id)
+	fmt.Printf("GetByID => IsNotFound=%v HTTP=%d err=%v\n", IsNotFound(err), ToHTTPStatus(err), err)
+
+	// 2. redis.Nil センチネル
+	_, err = d.cache.Get(ctx, "cache:user:"+id)
+	fmt.Printf("cache.Get => IsNotFound=%v HTTP=%d err=%v\n", IsNotFound(err), ToHTTPStatus(err), err)
+
+	// 3. ErrorCode / ErrorFault
+	var nf *NotFoundError
+	if errors.As(err, &nf) {
+		fmt.Printf("ErrorCode=%s ErrorFault=%d\n", nf.ErrorCode(), nf.ErrorFault())
 	}
 
-	{
-		// Option 型 (samber/mo 流儀)。NotFound を None で表現する。
-		user := d.repo.FindByID(ctx, missingID)
-		val, present := user.Get()
-		fmt.Printf("FindByID => IsNone=%v Get=(%v, %v)\n", user.IsNone(), val, present)
-	}
+	// 4. MaskNotFound
+	masked := MaskNotFound(err)
+	fmt.Printf("MaskNotFound => nil? %v\n", masked == nil)
 
-	{
-		// Option の変換ヘルパー (TupleToOption / PointerToOption)
-		tupleVal, tupleOK := TupleToOption("v", true).Get()
-		fmt.Printf("TupleToOption => (%v, %v)\n", tupleVal, tupleOK)
-		fmt.Printf("PointerToOption(nil) => IsNone=%v\n", PointerToOption[string](nil).IsNone())
-	}
+	// 5. fs.ErrNotExist（標準ライブラリのセンチネル）
+	fmt.Printf("fs.ErrNotExist => HTTP=%d\n", ToHTTPStatus(fs.ErrNotExist))
 
-	{
-		// 存在確認 API の分離 (viper.IsSet 流儀)
-		exists, _ := d.repo.Exists(ctx, missingID)
-		fmt.Printf("Exists => %v\n", exists)
-	}
+	// 6. lib/pq SQLState → ドメインエラー
+	pqErr := MapPQError(&pq.Error{Code: "42P01"})
+	fmt.Printf("MapPQError => IsNotFound=%v HTTP=%d err=%v\n", IsNotFound(pqErr), ToHTTPStatus(pqErr), pqErr)
 
-	{
-		// 0 件なら空コレクション (mongo Find 流儀)
-		users, _ := d.repo.List(ctx)
-		fmt.Printf("List => %d items\n", len(users))
-	}
-
-	{
-		// 番兵値 (strings.Index の -1 / redis Exists の 0)
-		fmt.Printf("Index => %d\n", strings.Index("a,b,c", "z"))
-
-		n, _ := d.rdb.Exists(ctx, missingKey).Result()
-		fmt.Printf("redis Exists => %d\n", n)
-	}
-
-	{
-		// Null 型 (sql.NullString 等。JSON の null と同じ表現)。
-		// 実データの NULL カラムで検証する。
-		if _, err := d.db.ExecContext(ctx, "INSERT INTO users (id, name, nickname) VALUES ($1, $2, $3)",
-			uuid.NewString(), "no-nickname", nil); err != nil {
-			panic(err)
-		}
-
-		var u User
-
-		if err := d.db.QueryRowContext(ctx, "SELECT id, name, nickname FROM users WHERE nickname IS NULL").
-			Scan(&u.ID, &u.Name, &u.Nickname); err != nil {
-			panic(err)
-		}
-
-		fmt.Printf("NullString => Valid=%v Value=%q\n", u.Nickname.Valid, u.Nickname.String)
-	}
-
-	{
-		// HTTP 層はエラーを返さず 404 を書く (http.NotFound helper)
-		rec := httptest.NewRecorder()
-		http.NotFound(rec, httptest.NewRequest(http.MethodGet, "/users/"+missingID, nil))
-		fmt.Printf("http.NotFound => %d (%s)\n", rec.Code, rec.Body.String())
-	}
+	fmt.Println()
 }
 
-// dbQueryErr は Scan の結果をそのまま返すだけのヘルパー。デモの表示を短くするためのもの。
-func dbQueryErr(ctx context.Context, db *sql.DB, query string, dest any) error {
-	return db.QueryRowContext(ctx, query).Scan(dest)
-}
+func demoNoErrorPatterns(ctx context.Context, d deps) {
+	fmt.Println("== エラー型を使わない表現 ==")
 
-func demoInterfacePatterns(ctx context.Context, d *deps, missingID string) {
-	// 同じ UserStore 契約に対して実装を差し替える。呼び出し側は実装を知らなくていい。
-	stores := []struct {
-		name  string
-		store UserStore
-	}{
-		{"postgres (型付きエラー契約)", NewPostgresUserStore(d.repo)},
-		{"redis    (センチネル契約)", NewRedisUserStore(d.rdb)},
-	}
+	id := uuid.NewString()
 
-	for _, s := range stores {
-		rec := httptest.NewRecorder()
-		handleGetFromStore(ctx, s.store, rec, missingID)
-		fmt.Printf("%s => %d (%s)\n", s.name, rec.Code, rec.Body.String())
+	// comma ok（os.LookupEnv / sync.Map.Load と同じ）
+	u, ok, err := d.repo.LookupByID(ctx, id)
+	fmt.Printf("LookupByID => ok=%v user=%v err=%v\n", ok, u, err)
 
-		// 契約が守られているかは conformance チェックで担保する (方法6)
-		if err := AssertUserStore(s.store, missingID); err != nil {
-			panic(err)
-		}
-		fmt.Printf("  contract ok\n")
-	}
+	// Option[T]（samber/mo.Option と同じ）
+	opt, err := d.repo.FindByID(ctx, id)
+	optVal, optOk := opt.Get()
+	fmt.Printf("FindByID => IsNone=%v Get=<%v,%v> err=%v\n", opt.IsNone(), optVal, optOk, err)
 
-	// 自前の NotFound 型で自己申告する実装 (方法3)
-	articleStore := NewMemoryArticleStore()
+	// 番兵値 → Option（PointerToOption 風）
+	var ptr *User
+	opt2 := PointerToOption(ptr)
+	fmt.Printf("PointerToOption(nil) => IsNone=%v\n", opt2.IsNone())
 
+	// Exists API（redis.Exists / viper.IsSet と同じ）
+	exists, err := d.repo.Exists(ctx, id)
+	fmt.Printf("Exists => %v\n", exists)
+
+	// 空コレクション（mongo Find / sql Rows と同じ）
+	users, err := d.repo.List(ctx)
+	fmt.Printf("List => %d items err=%v\n", len(users), err)
+
+	// 番兵値（strings.Index の -1 と同じ）
+	idx := strings.Index("hello", "z")
+	fmt.Printf("strings.Index => %d\n", idx)
+
+	// redis.Exists の 0/1
+	n, _ := d.cache.Exists(ctx, "nonexistent:key")
+	fmt.Printf("redis Exists => %d\n", n)
+
+	// Null 型（sql.NullString と同じ）
+	var ns sql.NullString
+	fmt.Printf("NullString => Valid=%v String=%q\n", ns.Valid, ns.String)
+
+	// http.NotFound helper
 	rec := httptest.NewRecorder()
-	handleGetArticle(ctx, articleStore, rec, missingID)
-	fmt.Printf("memory   (自己申告契約) => %d (%s)\n", rec.Code, rec.Body.String())
+	http.NotFound(rec, nil)
+	fmt.Printf("http.NotFound => %d\n", rec.Code)
+
+	fmt.Println()
+}
+
+func demoInterfacePatterns(ctx context.Context, d deps) {
+	fmt.Println("== インターフェース層での契約 ==")
+
+	id := uuid.NewString()
+
+	// 型付きエラー契約
+	pgStore := NewPostgresUserStore(d.repo)
+	AssertUserStore(pgStore)
+	rec := httptest.NewRecorder()
+	handleGetFromStore(pgStore)(rec, httptest.NewRequest(http.MethodGet, "/users/"+id, nil))
+	fmt.Printf("postgres (型付きエラー契約) => %d %s", rec.Code, rec.Body.String())
+
+	// センチネル契約
+	redisStore := NewRedisUserStore(d.rdb)
+	AssertUserStore(redisStore)
+	rec = httptest.NewRecorder()
+	handleGetFromStore(redisStore)(rec, httptest.NewRequest(http.MethodGet, "/users/"+id, nil))
+	fmt.Printf("redis    (センチネル契約) => %d %s", rec.Code, rec.Body.String())
+
+	// 自己申告契約
+	articleStore := NewMemoryArticleStore()
+	rec = httptest.NewRecorder()
+	handleGetArticle(articleStore)(rec, httptest.NewRequest(http.MethodGet, "/articles/"+id, nil))
+	fmt.Printf("memory   (自己申告契約) => %d %s", rec.Code, rec.Body.String())
 }
