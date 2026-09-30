@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/google/uuid"
+	"uuid"
 )
 
 const name = "session"
@@ -18,9 +18,9 @@ func main() {
 	http.HandleFunc("/begin", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info(r.URL.String())
 
-		session := uuid.NewString()
+		session := uuid.New().String()
 
-		mem[session] = uuid.NewString()
+		mem[session] = uuid.New().String()
 
 		cookie := http.Cookie{
 			Name:     name,

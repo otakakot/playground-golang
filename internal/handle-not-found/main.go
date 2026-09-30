@@ -10,8 +10,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 )
@@ -206,8 +206,8 @@ type Option[T any] struct {
 func Some[T any](v T) Option[T] { return Option[T]{present: true, value: v} }
 func None[T any]() Option[T]    { return Option[T]{} }
 
-func (o Option[T]) IsSome() bool      { return o.present }
-func (o Option[T]) IsNone() bool      { return !o.present }
+func (o Option[T]) IsSome() bool { return o.present }
+func (o Option[T]) IsNone() bool { return !o.present }
 func (o Option[T]) Get() (T, bool) {
 	if !o.present {
 		var zero T
@@ -300,7 +300,7 @@ func (r *UserRepo) Exists(ctx context.Context, id string) (bool, error) {
 // List は「無い場合は空スライス」を返す（mongo Find / sql Rows と同じ）。
 func (r *UserRepo) List(ctx context.Context) ([]User, error) {
 	// 存在しない UUID で必ず 0 件になるようにする。
-	rows, err := r.db.QueryContext(ctx, "SELECT id, name, nickname FROM users WHERE id = $1", uuid.NewString())
+	rows, err := r.db.QueryContext(ctx, "SELECT id, name, nickname FROM users WHERE id = $1", uuid.New().String())
 	if err != nil {
 		return nil, err
 	}
@@ -447,7 +447,7 @@ type Article struct {
 
 type articleNotFoundError struct{ ID string }
 
-func (e *articleNotFoundError) Error() string { return fmt.Sprintf("article %q not found", e.ID) }
+func (e *articleNotFoundError) Error() string  { return fmt.Sprintf("article %q not found", e.ID) }
 func (e *articleNotFoundError) NotFound() bool { return true }
 
 type MemoryArticleStore struct{ articles map[string]*Article }
@@ -569,7 +569,7 @@ func getEnv(key, fallback string) string {
 func demoErrorPatterns(ctx context.Context, d deps) {
 	fmt.Println("== エラー型を使う表現 ==")
 
-	id := uuid.NewString()
+	id := uuid.New().String()
 
 	// 1. 型付きエラー + errors.Is 拡張
 	_, err := d.repo.GetByID(ctx, id)
@@ -602,7 +602,7 @@ func demoErrorPatterns(ctx context.Context, d deps) {
 func demoNoErrorPatterns(ctx context.Context, d deps) {
 	fmt.Println("== エラー型を使わない表現 ==")
 
-	id := uuid.NewString()
+	id := uuid.New().String()
 
 	// comma ok（os.LookupEnv / sync.Map.Load と同じ）
 	u, ok, err := d.repo.LookupByID(ctx, id)
@@ -649,7 +649,7 @@ func demoNoErrorPatterns(ctx context.Context, d deps) {
 func demoInterfacePatterns(ctx context.Context, d deps) {
 	fmt.Println("== インターフェース層での契約 ==")
 
-	id := uuid.NewString()
+	id := uuid.New().String()
 
 	// 型付きエラー契約
 	pgStore := NewPostgresUserStore(d.repo)
