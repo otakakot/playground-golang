@@ -1,6 +1,6 @@
 module github.com/otakakot/playground-golang
 
-go 1.27
+go 1.27.2
 
 require (
 	github.com/lib/pq v1.12.3
